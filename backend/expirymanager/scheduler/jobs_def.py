@@ -1071,10 +1071,20 @@ async def run_maintenance(ctx: FireContext) -> FireResult:
         # place that knows the market opened on a Saturday for a special session or closed on a
         # weekday the published holiday list missed. The planner reads it in preference to the
         # weekday rule, so leaving it stale quietly returns the planner to guessing.
-        writer = getattr(ctx.services, "writer", None)
-        if writer is not None:
-            days = await maintenance_module.refresh_trading_days(writer)
+        # duck.writer, not a getattr on services. A getattr with a None default silently skips
+        # when the attribute is named something else, which is how this whole class of bug keeps
+        # happening: the job reports success, the table stays empty, and the planner quietly goes
+        # back to guessing. duck is already known non-None here.
+        try:
+            days = await maintenance_module.refresh_trading_days(duck.writer)
             notes.append(f"{days} trading days derived from spot bars")
+        except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+            # Deliberately not a silent skip. An empty dim_trading_day sends the planner back to
+            # a weekday rule, and the whole point of this table is that it should not have to
+            # guess. Recorded in the note so the schedules screen shows it, while the rest of
+            # maintenance still runs.
+            log.warning("trading day refresh failed", exc_info=exc)
+            notes.append(f"trading day refresh FAILED: {type(exc).__name__}")
         if reader is not None:
             failures = await maintenance_module.health_checks(reader)
             offending = [item for item in failures if item.get("offending")]

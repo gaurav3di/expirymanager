@@ -895,6 +895,33 @@ class TestEnqueue:
 # ---------------------------------------------------------------------------
 
 
+
+def _seed_spot_bars(store) -> None:
+    """One underlying and two days of spot bars, including a Saturday special session.
+
+    Written straight into DuckDB rather than through the ingest path, because what is under test
+    is whether the maintenance job derives dim_trading_day at all, not how candles arrive.
+    """
+    store.connection.execute(
+        "INSERT INTO dim_underlying (underlying_id, fyers_symbol, root, exchange, exchange_code,"
+        " segment, segment_code, instrument_kind, display_name, spot_contract_id,"
+        " underlying_fytoken, data_from, synced_at)"
+        " VALUES (1, 'NSE:NIFTY50-INDEX', 'NIFTY', 'NSE', 10, 'CM', 10, 'INDEX', 'Nifty 50',"
+        "         1, NULL, DATE '2022-01-03', now())"
+    )
+    rows = []
+    # A weekday and a Saturday. The Saturday is the case a weekday rule cannot see.
+    for day, count in ((date(2026, 9, 11), 5), (date(2026, 9, 12), 3)):
+        for minute in range(count):
+            ts = datetime(day.year, day.month, day.day, 9, 15 + minute)
+            rows.append((1, 2, ts, 100.0, 101.0, 99.0, 100.5, 10, None))
+    store.connection.executemany(
+        "INSERT INTO candles (contract_id, res_id, ts, open, high, low, close, volume, oi)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+
+
 class TestInternalActions:
     def test_budget_reset_rolls_the_day_and_releases_deferred_jobs(self, engine):
         governor = FakeGovernor()
@@ -953,6 +980,47 @@ class TestInternalActions:
         result = asyncio.run(service.run_now("builtin_maintenance"))
         assert result.outcome == "completed"
         assert result.note is not None and "wal" in result.note
+
+    def test_maintenance_actually_refreshes_the_trading_day_table(self, engine, store, reader):
+        """The job must leave dim_trading_day populated, not merely report that it ran.
+
+        dim_trading_day is derived from observed spot bars and is what the planner reads instead
+        of a weekday rule, so an empty table silently returns it to guessing. The rebuild existed
+        for a while with no caller at all, and the first attempt at a caller reached for a
+        services attribute that does not exist, so it skipped without complaint. Asserting the
+        note says "trading days" would have passed in both cases. Only the row count does not.
+        """
+        _seed_spot_bars(store)
+        before = store.connection.execute(
+            "SELECT count(*) FROM dim_trading_day"
+        ).fetchone()[0]
+        assert before == 0
+
+        services = Services(engine=engine, duck=store, governor=FakeGovernor())
+        service = build(engine, services=services)
+
+        async def body():
+            # The lifespan has the writer running whenever DuckDB is open, so the test mirrors
+            # that rather than asserting against a state production never reaches.
+            await store.writer.start()
+            try:
+                return await service.run_now("builtin_maintenance")
+            finally:
+                await store.writer.stop()
+
+        result = asyncio.run(body())
+
+        assert result.outcome == "completed"
+        assert "FAILED" not in (result.note or "")
+        rows = store.connection.execute(
+            "SELECT trade_date, session_open, session_close, bar_count, derived_from"
+            "  FROM dim_trading_day ORDER BY trade_date"
+        ).fetchall()
+        assert rows, "the maintenance job reported success and left the table empty"
+        assert all(row[4] == "spot_bars" for row in rows)
+        # The session bounds come from the bars themselves, which is the whole point.
+        assert all(row[1] is not None and row[2] is not None for row in rows)
+        assert all(row[3] > 0 for row in rows)
 
     def test_maintenance_prunes_rate_events_past_the_retention_window(self, engine):
         with engine.begin() as connection:
