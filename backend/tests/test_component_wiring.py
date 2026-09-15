@@ -100,3 +100,42 @@ def test_every_derived_table_rebuild_has_a_caller() -> None:
             f"{function} is defined and exported but nothing outside maintenance calls it, so the "
             "table it maintains stays empty and whatever reads it silently falls back"
         )
+
+
+def test_a_fresh_install_mirrors_its_underlyings_before_anything_reads_them() -> None:
+    """dim_underlying must be populated by starting the app, not by the first download.
+
+    Migration 0004 seeds four builtin underlyings into SQLite, and a SQL migration cannot reach
+    DuckDB, so the mirror starts empty. Nine analytic queries join it, and an empty mirror makes
+    all nine answer empty while the install looks configured. Contract discovery repaired one
+    underlying lazily, which hid the problem behind the first download.
+
+    Asserts the ROW COUNT in DuckDB after a real startup, not that a function was called.
+    """
+    import pathlib
+    import tempfile
+
+    from fastapi.testclient import TestClient
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = pathlib.Path(directory)
+        application = create_app(root=root, serve_static=False)
+        with TestClient(application, base_url="http://127.0.0.1:8000"):
+            services = application.state.services
+            registry = services.engine.connect()
+            try:
+                expected = registry.execute(
+                    __import__("sqlalchemy").text("SELECT count(*) FROM underlying_registry")
+                ).scalar_one()
+            finally:
+                registry.close()
+
+            mirrored = services.duck.connection.execute(
+                "SELECT count(*) FROM dim_underlying"
+            ).fetchone()[0]
+
+        assert expected > 0, "the migration seeds builtin underlyings, so this should not be zero"
+        assert mirrored == expected, (
+            f"{expected} underlyings in the SQLite registry but {mirrored} in the DuckDB mirror, "
+            "so every query that joins dim_underlying answers empty on a fresh install"
+        )

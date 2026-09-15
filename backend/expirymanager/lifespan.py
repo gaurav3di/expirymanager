@@ -317,6 +317,34 @@ async def _open_duckdb(state: AppState) -> None:
     # start() opens the file, applies the DDL and the macros, and starts the single writer task.
     await store.start()
     state.duck = store
+    await _mirror_underlyings(state)
+
+
+async def _mirror_underlyings(state: AppState) -> None:
+    """Copy the SQLite underlying registry into its DuckDB mirror.
+
+    dim_underlying is what nine analytic queries join against, and the registry rows are seeded by
+    a migration that cannot touch DuckDB, so on a fresh install the mirror is empty while the
+    registry has four rows. Everything then reads as though nothing is configured: the underlyings
+    list reports mirrored false, the spot join finds nothing, and the backward walk that seals a
+    contract gives up without a word.
+
+    Contract discovery repairs it lazily, which is why this was invisible for a while: the first
+    download fixed it as a side effect. Doing it at startup means an install is consistent before
+    anything reads it, and it is idempotent, so it is also the repair path for drift.
+
+    Never fatal. A mirror that cannot be written is worth a loud log and a degraded install, not a
+    server that refuses to start and leaves the user with no way in to fix it.
+    """
+    if state.duck is None or state.engine is None:
+        return
+    try:
+        from expirymanager.db.catalog_sync import mirror_underlyings
+
+        mirrored = await mirror_underlyings(state.engine, state.duck.writer)
+        log.info("underlying mirror synced", extra={"underlyings": mirrored})
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal
+        log.warning("underlying mirror sync failed", exc_info=exc)
 
 
 async def _close_duckdb(state: AppState) -> None:

@@ -19,6 +19,10 @@ from pathlib import Path
 
 import httpx
 import pytest
+
+from expirymanager.pipeline.handlers import contract_discovery
+from expirymanager.db.writes import ContractRow
+from decimal import Decimal
 from sqlalchemy import text
 
 from expirymanager.brokers.fyers.client import AuthContext, FyersClient
@@ -932,6 +936,78 @@ class TestBackwardProbing:
         assert pending == 0
         assert sealed_at(store, contract_id) is not None
 
+    async def test_the_walk_stops_at_the_range_from_the_sheet_was_priced_with(
+        self, engine, store, queue, contracts
+    ):
+        """A sheet that named a left edge is priced from it, so the walk must stop there too.
+
+        Measured against the live API: a sheet over 2025-03-24 to 2025-03-27 priced at 4 requests
+        and the gate was confirmed at 4, then the walk carried the four contracts back to their
+        listing date and spent 107. The planner clamps range_from by the sheet and the walk did
+        not, so the confirmed estimate and the requests actually spent were 27 times apart.
+        """
+        contract_id = contracts[0]
+        left_edge = date(2025, 3, 24)
+        candles = [bar(datetime(2025, 3, 24, 9, 15)), bar(datetime(2025, 3, 26, 15, 29))]
+        await store.writer.start()
+        try:
+            job = make_job(engine, params={"range_from": left_edge.isoformat()})
+            make_chunk_task(
+                engine,
+                job,
+                contract_id=contract_id,
+                range_from=left_edge,
+                range_to=date(2025, 3, 27),
+            )
+            client, _ = make_client(answer(candle_body(candles=candles)))
+            services = Services(client=client, store=store, engine=engine)
+            await run_through_worker(engine, queue, services, lease_one(queue))
+            await client.aclose()
+        finally:
+            await store.writer.stop()
+
+        with engine.connect() as connection:
+            pending = connection.execute(
+                text("SELECT count(*) FROM task WHERE job_id = :job AND state = 'pending'"),
+                {"job": job},
+            ).scalar_one()
+            total = connection.execute(
+                text("SELECT count(*) FROM task WHERE job_id = :job"), {"job": job}
+            ).scalar_one()
+        # Nothing older than the sheet's own left edge was planned, so the job stays the size the
+        # user confirmed.
+        assert pending == 0
+        assert total == 1
+
+    async def test_a_sheet_with_no_range_from_still_walks_the_contract_life(
+        self, engine, store, queue, contracts
+    ):
+        """The scheduled backfill names no left edge, and that path must keep walking."""
+        contract_id = contracts[0]
+        left_edge = date(2025, 1, 1)
+        candles = [bar(datetime(2025, 1, 1, 9, 15)), bar(datetime(2025, 3, 26, 15, 29))]
+        await store.writer.start()
+        try:
+            job = make_job(engine, params={"underlying_id": 1})
+            make_chunk_task(engine, job, contract_id=contract_id, range_from=left_edge)
+            client, _ = make_client(answer(candle_body(candles=candles)))
+            services = Services(client=client, store=store, engine=engine)
+            await run_through_worker(engine, queue, services, lease_one(queue))
+            await client.aclose()
+        finally:
+            await store.writer.stop()
+
+        with engine.connect() as connection:
+            planned = connection.execute(
+                text(
+                    "SELECT range_from, range_to FROM task"
+                    " WHERE job_id = :job AND state = 'pending'"
+                ),
+                {"job": job},
+            ).mappings().all()
+        assert len(planned) == 1
+        assert planned[0]["range_to"] == (left_edge - timedelta(days=1)).isoformat()
+
     async def test_the_walk_stops_at_the_exchange_floor(self, engine, store, queue, contracts):
         """NSE serves nothing before 2022-01-03, so a chunk that opens there has no successor."""
         contract_id = contracts[0]
@@ -1179,3 +1255,117 @@ class TestCommitBeforeAck:
         [coverage] = coverage_rows(store, contract_id)
         assert (coverage[2], coverage[3]) == ("ok", 0)
         assert sealed_at(store, contract_id) is not None
+
+
+class TestSymbolMasterEnrichment:
+    """The step that makes the daily symbol master snapshot worth taking.
+
+    Expired contracts vanish from the Fyers symbol master, so lot size and tick size are only
+    knowable while the contract is alive. W10 captures them daily into dim_instrument_master as a
+    type 2 dimension, and for a while nothing read it back: fact_on and facts_on were defined,
+    exported, tested, and called from nowhere, so dim_contract.lot_size was null on every row and
+    the loss was permanent the moment a contract expired. This is the fourth time this codebase
+    has shipped a function with no caller.
+
+    These assert the VALUES on the returned rows, not that a lookup ran.
+    """
+
+    async def test_facts_are_attached_to_the_matching_contract(self, reader_with_master) -> None:
+        reader, asof = reader_with_master
+        rows = [
+            _contract_row("NSE:NIFTY25MAR23000CE"),
+            _contract_row("NSE:NIFTY25MAR23100CE"),
+        ]
+        enriched, hits = await contract_discovery.enrich_from_symbol_master(
+            reader, rows, asof=asof
+        )
+        assert hits == 1
+        by_symbol = {row.fyers_symbol: row for row in enriched}
+        hit = by_symbol["NSE:NIFTY25MAR23000CE"]
+        assert hit.lot_size == 75
+        assert hit.tick_size == Decimal("0.05")
+        assert hit.fytoken == "101125031800000001"
+
+    async def test_a_contract_with_no_snapshot_is_left_alone_not_failed(
+        self, reader_with_master
+    ) -> None:
+        # Everything that expired before this app was installed has no snapshot, which is normal
+        # and must not cost the contract row.
+        reader, asof = reader_with_master
+        rows = [_contract_row("NSE:NIFTY25MAR23100CE")]
+        enriched, hits = await contract_discovery.enrich_from_symbol_master(
+            reader, rows, asof=asof
+        )
+        assert hits == 0
+        assert enriched[0].lot_size is None
+        assert enriched[0].fyers_symbol == "NSE:NIFTY25MAR23100CE"
+
+    async def test_it_resolves_as_of_the_expiry_not_as_of_today(
+        self, reader_with_master
+    ) -> None:
+        """A lot size change has a date, which is the entire reason for a type 2 dimension.
+
+        A contract that expired under the old lot size must report the old one, not whatever is
+        true now.
+        """
+        reader, _ = reader_with_master
+        rows = [_contract_row("NSE:NIFTY25MAR23000CE")]
+
+        old, _ = await contract_discovery.enrich_from_symbol_master(
+            reader, rows, asof=date(2025, 3, 20)
+        )
+        new, _ = await contract_discovery.enrich_from_symbol_master(
+            reader, rows, asof=date(2025, 6, 20)
+        )
+        assert old[0].lot_size == 75
+        assert new[0].lot_size == 50
+
+    async def test_no_rows_is_not_a_query(self, reader_with_master) -> None:
+        reader, asof = reader_with_master
+        enriched, hits = await contract_discovery.enrich_from_symbol_master(
+            reader, [], asof=asof
+        )
+        assert enriched == []
+        assert hits == 0
+
+
+def _contract_row(symbol: str) -> ContractRow:
+    """A minimally valid contract row. Only fyers_symbol matters to the enrichment."""
+    return ContractRow(
+        fyers_symbol=symbol,
+        kind="OPT",
+        instrument_class="OPTIDX",
+        exchange="NSE",
+        exchange_code=10,
+        segment="FO",
+        segment_code=11,
+        root="NIFTY",
+        source_endpoint="underlying-symbols",
+        parse_method="regex",
+        parse_confidence="high",
+    )
+
+
+@pytest.fixture
+def reader_with_master(store):
+    """dim_instrument_master carrying one instrument whose lot size changed.
+
+    75 until 2025-06-01 and 50 from then, so a point-in-time lookup has something to get wrong.
+    """
+    store.connection.executemany(
+        "INSERT INTO dim_instrument_master"
+        " (fytoken, symbol_ticker, exchange_code, segment_code, min_lot_size, tick_size,"
+        "  qty_freeze, qty_multiplier, valid_from, valid_to, row_hash)"
+        " VALUES (?, ?, 10, 11, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                "101125031800000001", "NSE:NIFTY25MAR23000CE", 75, Decimal("0.05"),
+                1800, Decimal("1"), date(2025, 1, 1), date(2025, 6, 1), "hash-lot-75",
+            ),
+            (
+                "101125031800000001", "NSE:NIFTY25MAR23000CE", 50, Decimal("0.05"),
+                1200, Decimal("1"), date(2025, 6, 1), None, "hash-lot-50",
+            ),
+        ],
+    )
+    return DuckReader(store), date(2025, 3, 27)

@@ -22,6 +22,7 @@ conflict clause when it cannot tell which one the caller meant.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -65,6 +66,8 @@ __all__ = [
     "record_export",
     "delete_export",
 ]
+
+log = logging.getLogger(__name__)
 
 SPOT_KIND = "SPOT"
 
@@ -532,8 +535,34 @@ class ContractBatchWrite:
     discovered_at: datetime | None = None
     label: str = field(default="contract_batch_upsert", init=False)
 
+    def deduplicated(self) -> tuple[ContractRow, ...]:
+        """One row per symbol, later occurrences winning.
+
+        Fyers really does repeat a symbol inside one response: the 2025-03-27 NIFTY expiry answers
+        549 option symbols of which 548 are distinct, NSE:NIFTY25MAR8000CE appearing twice. The
+        symbol is the contract's identity, so two such rows are one contract, and they share one
+        contract_id. Inserting both therefore violated the dim_contract primary key and rolled back
+        the whole transaction, losing all 549 contracts of the expiry rather than the one repeat.
+        Later wins because that is what the surrounding delete-then-insert already means by upsert.
+        """
+        by_symbol: dict[str, ContractRow] = {}
+        for row in self.rows:
+            by_symbol[row.fyers_symbol] = row
+        return tuple(by_symbol.values())
+
     def apply(self, cur: Any) -> ContractBatchResult:
         now = self.discovered_at or datetime.now()
+        rows = self.deduplicated()
+        if len(rows) != len(self.rows):
+            log.info(
+                "contract batch carried repeated symbols",
+                extra={
+                    "underlying_id": self.underlying_id,
+                    "expiry_date": self.expiry_date.isoformat(),
+                    "received": len(self.rows),
+                    "distinct": len(rows),
+                },
+            )
         cur.execute("BEGIN TRANSACTION")
         try:
             expiry_id = self._expiry_id(cur, now)
@@ -546,9 +575,9 @@ class ContractBatchWrite:
                 ).fetchall()
             }
             allocation = allocate_contract_block(
-                cur, self.underlying_id, self.expiry_date, len(self.rows)
+                cur, self.underlying_id, self.expiry_date, len(rows)
             )
-            assigned = assign_contract_ids(allocation, self.rows, existing)
+            assigned = assign_contract_ids(allocation, rows, existing)
 
             renumbered = {
                 old: assigned[symbol]
@@ -593,7 +622,7 @@ class ContractBatchWrite:
                         first_seen.get(row.fyers_symbol, now),
                         now,
                     )
-                    for row in self.rows
+                    for row in rows
                 ],
             )
 
@@ -608,7 +637,7 @@ class ContractBatchWrite:
             allocation=allocation,
             contract_ids=assigned,
             renumbered=renumbered,
-            rows_written=len(self.rows),
+            rows_written=len(rows),
         )
 
     def _expiry_id(self, cur: Any, now: datetime) -> int:

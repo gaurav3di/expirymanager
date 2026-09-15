@@ -36,6 +36,9 @@ from expirymanager.api.schemas.downloads import PlanRequest
 from expirymanager.brokers.fyers import endpoints as ep
 from expirymanager.brokers.fyers import roots as roots_module
 from expirymanager.brokers.fyers import symbology
+from dataclasses import replace
+from decimal import Decimal
+from expirymanager.brokers.fyers import symbol_master
 from expirymanager.db.writes import ContractRow, upsert_contracts
 from expirymanager.pipeline.handlers.candle_chunk import (
     ensure_underlying_mirror,
@@ -122,6 +125,61 @@ def build_contract_rows(
     return rows, unparseable
 
 
+async def enrich_from_symbol_master(
+    reader: Any, rows: list[ContractRow], *, asof: date
+) -> tuple[list[ContractRow], int]:
+    """Fill lot size, tick size and the other sizing facts from the symbol master snapshot.
+
+    This is the step that makes W10 worth having. Expired contracts VANISH from the Fyers symbol
+    master, so lot size and tick size are only knowable while the contract is alive. The daily
+    snapshot captures them into dim_instrument_master as a type 2 dimension, and this is where
+    that capture is finally attached to the contract rows. Without it the snapshot is written
+    every day, correctly, and read by nothing: dim_contract.lot_size stays null on every row and
+    the loss is permanent once the contract expires.
+
+    Joined on symbol_ticker rather than fytoken, because fytoken is what this is trying to
+    discover: the discovery response carries only a symbol string.
+
+    Resolved AS OF the expiry date, not as of today, because the whole point of a type 2 dimension
+    is that a lot size change has a date. A contract that expired under the old lot size must
+    report the old one.
+
+    Missing facts are not an error. A snapshot may not have been taken while the contract lived,
+    which is exactly true for everything that expired before this application was installed.
+    """
+    if not rows:
+        return rows, 0
+    symbols = [row.fyers_symbol for row in rows]
+    placeholders = ", ".join("?" for _ in symbols)
+    sql = symbol_master.point_in_time_sql(f"symbol_ticker IN ({placeholders})")
+    found = await reader.fetch_all(sql, [*symbols, asof, asof])
+
+    by_symbol = {}
+    for record in found:
+        by_symbol[record[1]] = record
+
+    enriched: list[ContractRow] = []
+    hits = 0
+    for row in rows:
+        record = by_symbol.get(row.fyers_symbol)
+        if record is None:
+            enriched.append(row)
+            continue
+        hits += 1
+        enriched.append(
+            replace(
+                row,
+                fytoken=record[0],
+                lot_size=None if record[2] is None else int(record[2]),
+                tick_size=None if record[3] is None else Decimal(str(record[3])),
+                qty_freeze=None if record[4] is None else int(record[4]),
+                qty_multiplier=None if record[5] is None else Decimal(str(record[5])),
+                instrument_master_valid_from=record[6],
+            )
+        )
+    return enriched, hits
+
+
 def _row(
     parsed: Any,
     symbol: str,
@@ -193,6 +251,22 @@ async def handle_underlying_symbols(ctx: HandlerContext) -> TaskOutcome:
 
     written = 0
     if rows:
+        # Attach the sizing facts before the write, so a contract is stored complete rather than
+        # needing a second pass that nothing would ever run.
+        try:
+            rows, fact_hits = await enrich_from_symbol_master(
+                services.require("reader"), rows, asof=expiry_date
+            )
+            if fact_hits:
+                log.info(
+                    "symbol master facts attached",
+                    extra={"contracts": len(rows), "with_facts": fact_hits},
+                )
+        except Exception:  # noqa: BLE001 - never lose the contracts over their metadata
+            log.exception(
+                "attaching symbol master facts failed",
+                extra={"task_id": task.task_id, "expiry_date": expiry_date.isoformat()},
+            )
         result = await upsert_contracts(
             services.require("writer"),
             underlying_id=underlying_id,

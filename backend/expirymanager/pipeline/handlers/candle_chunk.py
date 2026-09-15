@@ -654,10 +654,17 @@ async def _walk_bounds(
 ) -> WalkBounds | None:
     """The oldest date this contract may ever be requested from.
 
-    Three clamps, all of which the planner also applies: the exchange availability floor, the
-    underlying's own data_from, and the configured life window measured back from the expiry date.
-    Recomputing them here rather than carrying them on the task row keeps request_params_json
-    exactly what went on the wire, which is what makes it usable as provenance.
+    Four clamps, all of which the planner also applies: the exchange availability floor, the
+    underlying's own data_from, the configured life window measured back from the expiry date, and
+    the range_from of the sheet that was priced. Recomputing them here rather than carrying them on
+    the task row keeps request_params_json exactly what went on the wire, which is what makes it
+    usable as provenance.
+
+    The fourth clamp is not decoration. Without it the planner honoured a user's range_from and
+    this walk did not, so a sheet priced at 4 requests over four days spent 107 walking the
+    contracts back to their listing date. The commit gate exists to make the requests that are
+    spent the requests that were shown, and a walk that ignores the sheet's own left edge breaks
+    exactly that promise.
     """
     row = await reader.fetch_one(
         "SELECT c.kind, u.exchange, u.data_from, c.expiry_date, c.underlying_id"
@@ -689,7 +696,41 @@ async def _walk_bounds(
     if expiry_date is not None and life_days:
         floor = max(floor, expiry_date - timedelta(days=life_days))
 
+    sheet_floor = _sheet_range_from(engine, task.job_id)
+    if sheet_floor is not None:
+        floor = max(floor, sheet_floor)
+
     return WalkBounds(exchange=exchange, floor=floor, expiry_date=expiry_date, kind=kind)
+
+
+def _sheet_range_from(engine: Any, job_id: Any) -> date | None:
+    """The range_from of the sheet this task's job was priced from, or None when it named none.
+
+    None means the sheet left the left edge to the life window, which is the scheduled backfill
+    path, and the walk is then bounded by the other three clamps exactly as before.
+    """
+    if not job_id:
+        return None
+    with engine.connect() as connection:
+        row = connection.execute(
+            text("SELECT params_json FROM job WHERE job_id = :job_id"),
+            {"job_id": str(job_id)},
+        ).fetchone()
+    if row is None or not row[0]:
+        return None
+    try:
+        params = json.loads(row[0])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(params, dict):
+        return None
+    raw = params.get("range_from")
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(str(raw))
+    except ValueError:
+        return None
 
 
 def _life_days(engine: Any, underlying_id: int, kind: str) -> int | None:

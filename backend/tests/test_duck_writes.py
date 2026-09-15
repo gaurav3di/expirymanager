@@ -468,3 +468,37 @@ def test_an_ingest_run_opens_and_closes(store):
     assert row[0] == "succeeded"
     assert (row[1], row[2]) == (12, 340)
     assert row[3] is not None
+
+
+def test_a_repeated_symbol_in_one_response_writes_one_contract_and_keeps_the_rest(store):
+    """Measured vendor behaviour: Fyers repeats a symbol inside one expiry's option array.
+
+    GET expired contracts for NSE:NIFTY50-INDEX on 2025-03-27 answers 549 option symbols of which
+    548 are distinct, NSE:NIFTY25MAR8000CE appearing twice. Both copies are one contract and share
+    one contract_id, so inserting both violated the dim_contract primary key, rolled the whole
+    transaction back and lost all 549 contracts of the expiry. Asserted on the stored rows.
+    """
+    rows = chain_rows([22900, 23000, 23100])
+    repeated = rows[0]
+    with_duplicate = (*rows, repeated)
+
+    async def body(writer):
+        await upsert_underlying(writer, nifty())
+        return await upsert_contracts(
+            writer, underlying_id=1, expiry_date=EXPIRY, rows=with_duplicate
+        )
+
+    result = run(store, body)
+
+    # The whole chain survives, and the repeat is counted once.
+    assert result.rows_written == len(rows)
+    stored = store.connection.execute(
+        "SELECT count(*), count(DISTINCT contract_id), count(DISTINCT fyers_symbol) "
+        "FROM dim_contract WHERE expiry_date = ?",
+        [EXPIRY],
+    ).fetchone()
+    assert stored == (len(rows), len(rows), len(rows))
+    held = store.connection.execute(
+        "SELECT count(*) FROM dim_contract WHERE fyers_symbol = ?", [repeated.fyers_symbol]
+    ).fetchone()[0]
+    assert held == 1

@@ -1263,6 +1263,11 @@ class TestLifespanWiring:
         from expirymanager import lifespan as lifespan_module
         from expirymanager.scheduler import service as service_module
 
+        # The component registry is module-global, so any earlier test in this process that built
+        # an application has already filled the supervisor and recovery slots. Clear it on the way
+        # in as well as on the way out, or this assertion reports another test's registrations.
+        for slot in lifespan_module.COMPONENT_SLOTS:
+            lifespan_module.unregister_component(slot)
         try:
             service_module.install()
             assert lifespan_module.registered_components() == (lifespan_module.SLOT_SCHEDULER,)
