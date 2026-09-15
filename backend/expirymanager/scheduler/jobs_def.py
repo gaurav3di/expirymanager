@@ -1066,6 +1066,15 @@ async def run_maintenance(ctx: FireContext) -> FireResult:
 
         result = await maintenance_module.checkpoint(duck)
         notes.append(f"wal {result.wal_bytes_before} to {result.wal_bytes_after} bytes")
+
+        # dim_trading_day is rebuilt from the spot bars actually observed, and it is the only
+        # place that knows the market opened on a Saturday for a special session or closed on a
+        # weekday the published holiday list missed. The planner reads it in preference to the
+        # weekday rule, so leaving it stale quietly returns the planner to guessing.
+        writer = getattr(ctx.services, "writer", None)
+        if writer is not None:
+            days = await maintenance_module.refresh_trading_days(writer)
+            notes.append(f"{days} trading days derived from spot bars")
         if reader is not None:
             failures = await maintenance_module.health_checks(reader)
             offending = [item for item in failures if item.get("offending")]

@@ -24,6 +24,7 @@ from expirymanager.db import migrate as migrate_module
 from expirymanager.db import sqlite as sqlite_module
 from expirymanager.db.duck import DuckStore
 from expirymanager.db.reader import DuckReader
+from expirymanager.pipeline import planner
 from expirymanager.pipeline.planner import (
     BYTES_PER_ROW,
     DEFAULT_PER_MINUTE,
@@ -881,3 +882,85 @@ def test_a_seconds_resolution_chunks_at_its_own_smaller_limit(engine, store, rea
     specs = {item.fyers_code: item for item in planner._load_resolutions(["5S", "1"])}
     assert specs["5S"].chunk_days == 30
     assert specs["1"].chunk_days == MAX_DAYS_PER_REQUEST
+
+
+# ---------------------------------------------------------------------------
+# Session length is observed, never assumed
+# ---------------------------------------------------------------------------
+
+
+class TestSessionLength:
+    """Nothing here encodes market hours.
+
+    The NSE derivatives close moved from 15:30 to 15:40 on 2026-08-03, measured against live one
+    minute candles on 2026-09-15: every full day through Friday 2026-07-31 ends with a bar opening
+    at 15:29 and every full day from Monday 2026-08-03 ends with one opening at 15:39. A rule
+    written around that date would be wrong at the next change and is already wrong for a muhurat
+    session or an ad hoc extension, so the planner reads dim_trading_day instead.
+    """
+
+    def test_bars_per_day_follows_the_session_it_is_given(self) -> None:
+        spec = planner.ResolutionSpec(fyers_code="1", res_id=2, seconds=60, is_seconds=False)
+        assert spec.bars_per_trading_day(375 * 60) == 375
+        assert spec.bars_per_trading_day(385 * 60) == 385
+        # A muhurat session is roughly an hour and needs no special case.
+        assert spec.bars_per_trading_day(60 * 60) == 60
+
+    def test_a_daily_resolution_is_one_bar_whatever_the_session(self) -> None:
+        spec = planner.ResolutionSpec(fyers_code="D", res_id=100, seconds=86_400, is_seconds=False)
+        assert spec.bars_per_trading_day(375 * 60) == 1
+        assert spec.bars_per_trading_day(385 * 60) == 1
+
+    def test_the_nominal_fallback_is_the_longest_regular_session_seen(self) -> None:
+        # Overestimating on a cold start is the safe direction: the sheet promises no less data
+        # than the user will actually receive.
+        assert planner.NOMINAL_SESSION_SECONDS == 385 * 60
+        assert planner.SESSION_SECONDS == planner.NOMINAL_SESSION_SECONDS
+
+    def test_no_session_clock_time_is_hardcoded_in_the_module(self) -> None:
+        # The guard that keeps this from creeping back. A close time written into the planner is
+        # what silently centred the ATM band on the 15:30 bar after the session was extended.
+        source = Path(planner.__file__).read_text(encoding="utf-8")
+        code = "\n".join(
+            line for line in source.split("\n") if not line.lstrip().startswith("#")
+        )
+        for forbidden in ("time(15, 30)", "time(15, 40)", "time(9, 15)"):
+            assert forbidden not in code, f"{forbidden} is hardcoded in the planner"
+
+
+class TestObservedSessionSeconds:
+    async def test_it_reads_the_longest_observed_day(self, planner_with_trading_days) -> None:
+        planner_obj, exchange = planner_with_trading_days
+        assert await planner_obj._observed_session_seconds(exchange) == 385 * 60
+
+    async def test_it_returns_none_when_nothing_has_been_observed(
+        self, planner_with_trading_days
+    ) -> None:
+        planner_obj, _ = planner_with_trading_days
+        assert await planner_obj._observed_session_seconds("NOSUCH") is None
+
+
+@pytest.fixture
+def planner_with_trading_days(store, reader, engine):
+    """dim_trading_day carrying both session regimes plus a short special session.
+
+    375 minute days from before 2026-08-03, 385 minute days after it, and one deliberately short
+    day to prove a short session cannot drag the answer down. The planner wants the longest, so a
+    muhurat hour sitting in the table must not shrink a cold start estimate.
+    """
+    rows = [
+        ("NSE", date(2026, 7, 30), datetime(2026, 7, 30, 9, 15), datetime(2026, 7, 30, 15, 30)),
+        ("NSE", date(2026, 7, 31), datetime(2026, 7, 31, 9, 15), datetime(2026, 7, 31, 15, 30)),
+        ("NSE", date(2026, 8, 3), datetime(2026, 8, 3, 9, 15), datetime(2026, 8, 3, 15, 40)),
+        ("NSE", date(2026, 8, 4), datetime(2026, 8, 4, 9, 15), datetime(2026, 8, 4, 15, 40)),
+        # A muhurat style special session: one hour, and it must not lower the maximum.
+        ("NSE", date(2026, 11, 1), datetime(2026, 11, 1, 18, 0), datetime(2026, 11, 1, 19, 0)),
+    ]
+    store.connection.executemany(
+        "INSERT INTO dim_trading_day"
+        " (exchange, trade_date, session_open, session_close, bar_count, contract_count,"
+        "  derived_from)"
+        " VALUES (?, ?, ?, ?, NULL, NULL, 'spot_bars')",
+        rows,
+    )
+    return make_planner(reader, engine), "NSE"

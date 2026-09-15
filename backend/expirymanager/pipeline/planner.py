@@ -83,18 +83,29 @@ log = logging.getLogger(__name__)
 # Measured against real Parquet output. Used only for the preview, never for a disk guard.
 BYTES_PER_ROW = 15.21
 
-# 09:15 to 15:30 IST. The nominal bar count per trading day is this divided by the resolution.
-# It is only the fallback: once any chunk has been fetched at a resolution the planner uses the
-# observed average instead, which is both more accurate and self correcting.
-SESSION_SECONDS = 22_500
+# Session length is OBSERVED, never assumed. dim_trading_day records session_open, session_close
+# and bar_count per exchange per day, derived from real spot bars, and the planner reads the
+# longest recent day out of it.
+#
+# Deliberately not a constant, and deliberately not a pair of constants switched on a date. The
+# NSE derivatives close moved from 15:30 to 15:40 on 2026-08-03, which was measured here, but
+# encoding that as a rule would be wrong the next time it changes and is already wrong for a
+# muhurat session, an exchange extension on a settlement day, or any special session. A number
+# read from what actually traded needs no maintenance and cannot drift.
+#
+# This value is a LAST RESORT, used only when an install has never stored a single spot bar for
+# the exchange, which is true exactly once per exchange on a brand new install. It is the longest
+# regular session observed to date, so a cold start overestimates rows rather than underestimating
+# them, and the estimate stops being nominal the moment any real data lands. Nothing but the
+# preview's row and byte figures depends on it.
+NOMINAL_SESSION_SECONDS = 385 * 60
+
+# Kept under its original name because the rest of the module and its tests already use it.
+SESSION_SECONDS = NOMINAL_SESSION_SECONDS
 
 # The governor's effective per minute target, not the published 200. ETA has to be honest about
 # the rate the pipeline will actually run at.
 DEFAULT_PER_MINUTE = 170
-
-# The moment of an expiry day used to read spot for an ATM band. The close, because that is the
-# settlement reference a user means by "at the money on expiry day".
-_SESSION_CLOSE = time(15, 30)
 
 # MCX is not served by the expired F&O endpoints. Seven underlying forms all returned 422 in the
 # same probe run in which BSE:SENSEX-INDEX returned 200, so a plan against an MCX underlying is
@@ -179,11 +190,15 @@ class ResolutionSpec:
             return max(1, min(MAX_DAYS_PER_REQUEST, self.max_days))
         return MAX_DAYS_PER_REQUEST
 
-    @property
-    def bars_per_trading_day(self) -> int:
+    def bars_per_trading_day(self, session_seconds: int = NOMINAL_SESSION_SECONDS) -> int:
+        """Nominal bars in one trading day at this resolution.
+
+        Takes the session length rather than reading a module constant, so the caller can pass
+        what the exchange was actually observed to do instead of what a rule says it should.
+        """
         if self.seconds >= 86_400:
             return 1
-        return max(1, math.ceil(SESSION_SECONDS / self.seconds))
+        return max(1, math.ceil(session_seconds / self.seconds))
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +306,12 @@ class Planner:
 
         resolutions = self._load_resolutions(request.resolutions)
         calendar, holidays_loaded = self._load_calendar(underlying.exchange)
+        # Days that actually produced bars outrank both the holiday table and the weekday rule.
+        # NSE runs special live sessions on a Saturday, and without this the planner counts them
+        # as closed and drops them from every estimate.
+        observed_days = await self._observed_trading_days(underlying.exchange)
+        if observed_days:
+            calendar.add_observed(underlying.exchange, observed_days)
 
         tally = _Tally()
         if not holidays_loaded:
@@ -379,6 +400,11 @@ class Planner:
         observed_rows = await self._observed_rows_per_chunk(
             underlying.underlying_id, [item.res_id for item in resolutions]
         )
+        # Read once per plan rather than per chunk: it is one query and the answer cannot change
+        # while a plan is being priced.
+        session_seconds = (
+            await self._observed_session_seconds(underlying.exchange)
+        ) or NOMINAL_SESSION_SECONDS
 
         for expiry_date in discovered:
             contracts = await self._load_contracts(
@@ -404,6 +430,7 @@ class Planner:
                 expiry_date=expiry_date,
                 request=request,
                 observed_rows=observed_rows,
+                session_seconds=session_seconds,
                 today=today,
                 moment=moment,
                 probe_backward=probe_backward,
@@ -420,6 +447,7 @@ class Planner:
                 request=request,
                 expiry_dates=known or list(request.expiry_dates),
                 observed_rows=observed_rows,
+                session_seconds=session_seconds,
                 today=today,
                 moment=moment,
             )
@@ -465,6 +493,7 @@ class Planner:
         expiry_date: date,
         request: PlanRequest,
         observed_rows: Mapping[int, int],
+        session_seconds: int,
         today: date,
         moment: datetime,
         probe_backward: bool,
@@ -527,6 +556,7 @@ class Planner:
                     held=held.get(contract_id, ()),
                     calendar=calendar,
                     observed_rows=observed_rows,
+                    session_seconds=session_seconds,
                     probe_backward=probe_backward,
                 )
                 seq += emitted
@@ -547,6 +577,7 @@ class Planner:
         held: Sequence[tuple[date, date, str, int]],
         calendar: TradingCalendar,
         observed_rows: Mapping[int, int],
+        session_seconds: int,
         probe_backward: bool,
     ) -> int:
         """Walk one contract's chunks newest first and emit what is actually missing.
@@ -581,6 +612,7 @@ class Planner:
                 chunk_to=chunk_to,
                 resolution=resolution,
                 observed_rows=observed_rows,
+                session_seconds=session_seconds,
                 tally=tally,
             )
             tally.tasks.append(
@@ -628,6 +660,7 @@ class Planner:
         request: PlanRequest,
         expiry_dates: Sequence[date],
         observed_rows: Mapping[int, int],
+        session_seconds: int,
         today: date,
         moment: datetime,
     ) -> int:
@@ -676,6 +709,7 @@ class Planner:
                     chunk_to=chunk_to,
                     resolution=resolution,
                     observed_rows=observed_rows,
+                    session_seconds=session_seconds,
                     tally=tally,
                 )
                 tally.tasks.append(
@@ -769,6 +803,7 @@ class Planner:
         chunk_to: date,
         resolution: ResolutionSpec,
         observed_rows: Mapping[int, int],
+        session_seconds: int,
         tally: _Tally,
     ) -> int:
         """Expected rows from one request.
@@ -777,6 +812,9 @@ class Planner:
         because it already carries the truth that a weekly option only trades for a few days of
         a 100 day window. The nominal calculation is the fallback for a first ever download, and
         it says so in a warning rather than pretending to a precision it does not have.
+
+        `session_seconds` is the longest session observed for the exchange, or the nominal value
+        when this install has never stored a spot bar for it. Nothing here assumes market hours.
         """
         observed = observed_rows.get(resolution.res_id)
         if observed:
@@ -786,10 +824,16 @@ class Planner:
             "No chunk has been fetched at one or more of the selected resolutions yet, so the "
             "row and byte estimates assume a full trading session for every day of the window. "
             "The real figures will be lower for short lived contracts.",
-            {"resolution": resolution.fyers_code},
+            {
+                "resolution": resolution.fyers_code,
+                "session_seconds": session_seconds,
+                "session_source": (
+                    "observed" if session_seconds != NOMINAL_SESSION_SECONDS else "nominal"
+                ),
+            },
         )
         days = calendar.count_trading_days(exchange, chunk_from, chunk_to)
-        return days * resolution.bars_per_trading_day
+        return days * resolution.bars_per_trading_day(session_seconds)
 
     def _price(self, tally: _Tally, *, sweep: bool) -> PlanPreview:
         """Turn the tally into the preview, including the budget arithmetic."""
@@ -1118,16 +1162,24 @@ class Planner:
         ]
 
     async def _spot_on(self, underlying_id: int, expiry_date: date) -> float | None:
-        """Last spot close at or before the expiry day's close, at any stored resolution.
+        """Last spot bar of the expiry day, at any stored resolution.
 
         Any resolution, because the band only needs a price good to within a strike step, and
         insisting on one interval would refuse a sheet whose underlying was captured at another.
+
+        Bounded by the END OF THE DAY rather than by a session close time. What is wanted is the
+        settlement reference, meaning the last price of that day, and asking for it as "at or
+        before 15:30" quietly returned the 15:30 bar once the NSE derivatives session was extended
+        to 15:40 on 2026-08-03. On a trending last ten minutes that is enough to centre the ATM
+        band a strike step away from where it belongs, which shifts every contract the sheet then
+        downloads. An end of day bound is correct under both regimes and under the next change to
+        them, and it needs no constant to be kept up to date.
         """
-        moment = datetime.combine(expiry_date, _SESSION_CLOSE)
+        moment = datetime.combine(expiry_date + timedelta(days=1), time.min)
         row = await self._reader.fetch_one(
             "SELECT c.close FROM candles c"
             "  JOIN dim_underlying u ON u.spot_contract_id = c.contract_id"
-            " WHERE u.underlying_id = ? AND c.ts <= ?"
+            " WHERE u.underlying_id = ? AND c.ts < ?"
             " ORDER BY c.ts DESC LIMIT 1",
             [underlying_id, moment],
         )
@@ -1157,6 +1209,48 @@ class Planner:
                 (_as_date(range_from), _as_date(range_to), str(status), int(row_count))
             )
         return out
+
+    async def _observed_trading_days(self, exchange: str) -> list[date]:
+        """Every day dim_trading_day has evidence for, on this exchange.
+
+        Only days carrying bars. A row with no bar count is a placeholder rather than proof that
+        the market opened, and treating it as proof would let a seeded guess override the rule it
+        was supposed to defer to.
+        """
+        rows = await self._reader.fetch_all(
+            "SELECT trade_date FROM dim_trading_day"
+            " WHERE exchange = ? AND COALESCE(bar_count, 0) > 0",
+            [exchange],
+        )
+        return [_as_date(row[0]) for row in rows if row and row[0] is not None]
+
+    async def _observed_session_seconds(self, exchange: str) -> int | None:
+        """Longest regular session this install has actually observed for an exchange.
+
+        Read from dim_trading_day, which is derived from real spot bars rather than from any rule
+        about market hours. That is the whole point: the NSE derivatives close moved from 15:30 to
+        15:40 on 2026-08-03, and a muhurat session or an ad hoc extension moves it again for a
+        single day. Anything derived from what traded absorbs all of that without a code change.
+
+        The longest rather than the median, because this feeds a cold start estimate and a high
+        estimate is the safe direction: it overstates rows and bytes on the download sheet instead
+        of promising a smaller download than the user gets.
+
+        A short day still in the table cannot drag the number down, but a one off long session can
+        raise it, which is why this is only ever the fallback and is replaced by the observed rows
+        per chunk as soon as any chunk exists.
+        """
+        row = await self._reader.fetch_one(
+            "SELECT CAST(max(date_diff('second', session_open, session_close)) AS BIGINT)"
+            "  FROM dim_trading_day"
+            " WHERE exchange = ? AND session_open IS NOT NULL AND session_close IS NOT NULL"
+            "   AND session_close > session_open",
+            [exchange],
+        )
+        if row is None or row[0] is None:
+            return None
+        seconds = int(row[0])
+        return seconds if seconds > 0 else None
 
     async def _observed_rows_per_chunk(
         self, underlying_id: int, res_ids: Sequence[int]

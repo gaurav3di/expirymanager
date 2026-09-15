@@ -312,3 +312,57 @@ def test_is_within_seconds_window(cal):
 def test_an_old_expiry_is_outside_the_seconds_window(cal):
     """Seconds data does not exist for it, so requesting it burns budget for nothing."""
     assert not cal.is_within_seconds_window("NSE", date(2025, 1, 9), date(2026, 9, 9))
+
+
+class TestSpecialSessions:
+    """A day that traded is a trading day, whatever the weekday rule says.
+
+    NSE runs special live sessions on a Saturday and occasionally a Sunday. A calendar built only
+    from weekday arithmetic answers False for those, which makes real data look impossible: the
+    row estimate drops the day, and anything reasoning in trading days counts it as closed.
+    """
+
+    def test_an_observed_saturday_is_a_trading_day(self) -> None:
+        saturday = date(2026, 9, 12)
+        assert saturday.weekday() == 5
+        calendar = TradingCalendar()
+        assert calendar.is_trading_day("NSE", saturday) is False
+
+        calendar.add_observed("NSE", [saturday])
+        assert calendar.is_trading_day("NSE", saturday) is True
+
+    def test_an_observed_sunday_is_a_trading_day(self) -> None:
+        sunday = date(2026, 9, 13)
+        assert sunday.weekday() == 6
+        calendar = TradingCalendar(observed={"NSE": [sunday]})
+        assert calendar.is_trading_day("NSE", sunday) is True
+
+    def test_an_observed_day_beats_a_holiday_row(self) -> None:
+        # A session held on a day the published list called a holiday. The bars are the evidence.
+        day = date(2026, 10, 20)
+        calendar = TradingCalendar(holidays={"NSE": [day]})
+        assert calendar.is_trading_day("NSE", day) is False
+
+        calendar.add_observed("NSE", [day])
+        assert calendar.is_trading_day("NSE", day) is True
+
+    def test_a_weekend_session_is_counted_and_listed(self) -> None:
+        saturday = date(2026, 9, 12)
+        calendar = TradingCalendar(observed={"NSE": [saturday]})
+        days = calendar.trading_days("NSE", date(2026, 9, 11), date(2026, 9, 14))
+        assert saturday in days
+        assert calendar.count_trading_days("NSE", date(2026, 9, 11), date(2026, 9, 14)) == len(days)
+
+    def test_absence_of_evidence_falls_back_to_the_rule(self) -> None:
+        # The asymmetry that matters. Not having downloaded a Tuesday must not turn it into a
+        # holiday, or a fresh install would conclude the market never opens.
+        tuesday = date(2026, 9, 15)
+        assert tuesday.weekday() == 1
+        calendar = TradingCalendar(observed={"NSE": [date(2026, 9, 12)]})
+        assert calendar.is_trading_day("NSE", tuesday) is True
+
+    def test_observed_days_are_per_exchange(self) -> None:
+        saturday = date(2026, 9, 12)
+        calendar = TradingCalendar(observed={"NSE": [saturday]})
+        assert calendar.is_trading_day("NSE", saturday) is True
+        assert calendar.is_trading_day("BSE", saturday) is False

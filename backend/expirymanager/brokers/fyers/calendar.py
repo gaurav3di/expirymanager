@@ -166,20 +166,40 @@ def chunk_range(
 
 
 class TradingCalendar:
-    """Trading days per exchange, from weekends plus the market_holiday table.
+    """Trading days per exchange, answered from evidence first and a rule second.
 
-    Holidays are injected rather than hardcoded: the authoritative list lives in
-    sqlite.market_holiday, and dim_trading_day is ultimately derived from observed spot bars.
-    With no holidays loaded this degrades to a weekday calendar, which counts too few
-    non-trading days and therefore makes the 30 trading day seconds window start later than
-    reality. That direction is the safe one (a contract is treated as outside the window rather
-    than inside it), but the holiday table should always be loaded in production.
+    Three sources, in descending order of authority:
+
+    1. Observed days, from dim_trading_day, which is derived from real spot bars. A day that
+       produced bars traded, full stop. This is what makes a special session on a Saturday or a
+       Sunday visible, and NSE does run those: a rule that answers False for them makes real
+       downloadable data look like it cannot exist.
+    2. The market_holiday table, injected rather than hardcoded, because NSE and BSE expiry
+       weekdays and holiday lists have both changed several times since 2022.
+    3. The weekday rule, as a last resort.
+
+    The precedence runs one way only. Evidence that a day traded overrides everything, but the
+    absence of evidence proves nothing: a day missing from the observed set is usually just a day
+    this install has not downloaded, so absence falls back to the rule rather than declaring the
+    market shut.
+
+    With no holidays loaded this degrades to a weekday calendar, which counts too few non-trading
+    days and therefore makes the 30 trading day seconds window start later than reality. That
+    direction is the safe one, a contract is treated as outside the window rather than inside it,
+    but the holiday table should always be loaded in production.
     """
 
-    def __init__(self, holidays: Mapping[str, Iterable[date]] | None = None) -> None:
+    def __init__(
+        self,
+        holidays: Mapping[str, Iterable[date]] | None = None,
+        observed: Mapping[str, Iterable[date]] | None = None,
+    ) -> None:
         self._holidays: dict[str, set[date]] = {ex: set() for ex in EXCHANGES}
+        self._observed: dict[str, set[date]] = {ex: set() for ex in EXCHANGES}
         for exchange, days in (holidays or {}).items():
             self.add_holidays(exchange, days)
+        for exchange, days in (observed or {}).items():
+            self.add_observed(exchange, days)
 
     def _bucket(self, exchange: str) -> set[date]:
         key = exchange.strip().upper()
@@ -195,20 +215,51 @@ class TradingCalendar:
     def holidays(self, exchange: str) -> frozenset[date]:
         return frozenset(self._bucket(exchange))
 
+    def add_observed(self, exchange: str, days: Iterable[date]) -> None:
+        """Days the exchange was actually seen to trade, from dim_trading_day.
+
+        These OVERRIDE the weekday and holiday rules, in one direction only. A day that produced
+        bars is a trading day whatever the rule says, which is how a special session on a Saturday
+        or a Sunday stops being invisible. The reverse does not hold: a day absent from here is not
+        evidence of a closed market, only of data this install has not downloaded, so absence falls
+        back to the rule rather than declaring the market shut.
+        """
+        bucket = self._observed_bucket(exchange)
+        for day in days:
+            bucket.add(day if isinstance(day, date) else date.fromisoformat(str(day)))
+
+    def observed(self, exchange: str) -> frozenset[date]:
+        return frozenset(self._observed_bucket(exchange))
+
+    def _observed_bucket(self, exchange: str) -> set[date]:
+        key = exchange.strip().upper()
+        if key not in self._observed:
+            raise ValueError(f"unknown exchange {exchange!r}")
+        return self._observed[key]
+
     @staticmethod
     def is_weekend(day: date) -> bool:
         return day.weekday() >= _SATURDAY
 
     def is_trading_day(self, exchange: str, day: date) -> bool:
+        """True when the exchange traded, observed evidence first.
+
+        The weekday rule is a guess and the observed set is a fact, so the fact wins. NSE runs
+        special live sessions on a Saturday or a Sunday, and a calendar that answers False for
+        those makes real data look like it should not exist.
+        """
+        if day in self._observed_bucket(exchange):
+            return True
         return not self.is_weekend(day) and day not in self._bucket(exchange)
 
     def trading_days(self, exchange: str, start: date, end: date) -> list[date]:
         """Inclusive list of trading days in [start, end]."""
         holidays = self._bucket(exchange)
+        observed = self._observed_bucket(exchange)
         out: list[date] = []
         day = start
         while day <= end:
-            if not self.is_weekend(day) and day not in holidays:
+            if day in observed or (not self.is_weekend(day) and day not in holidays):
                 out.append(day)
             day += timedelta(days=1)
         return out

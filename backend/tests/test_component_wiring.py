@@ -63,3 +63,40 @@ def test_building_the_app_twice_does_not_double_register(built_app) -> None:
     with tempfile.TemporaryDirectory() as directory:
         create_app(root=pathlib.Path(directory), serve_static=False)
     assert len(lifespan.registered_components()) == before
+
+
+# ---------------------------------------------------------------------------
+# Derived tables need a caller, or they are empty forever
+# ---------------------------------------------------------------------------
+
+
+def test_every_derived_table_rebuild_has_a_caller() -> None:
+    """A derived table nobody refreshes is worse than no table at all.
+
+    This has already happened twice. dim_underlying had an upsert that nothing outside tests
+    called, and the omission survived every unit test because the fixtures inserted the rows by
+    hand; it surfaced only when a live download silently failed to seal a contract. dim_trading_day
+    then repeated it: refresh_trading_days was written, exported and never called, so the planner's
+    observed trading days would have been permanently empty and it would have fallen back to the
+    weekday rule while appearing to consult real data.
+
+    Both failures look identical from outside: correct code, passing tests, an empty table, and a
+    silent downgrade to a guess.
+    """
+    import pathlib
+
+    import expirymanager
+
+    root = pathlib.Path(expirymanager.__file__).parent
+    sources = [
+        path.read_text(encoding="utf-8")
+        for path in root.rglob("*.py")
+        if "maintenance.py" not in path.name
+    ]
+    body = "\n".join(sources)
+
+    for function in ("refresh_trading_days", "upsert_underlying"):
+        assert f"{function}(" in body, (
+            f"{function} is defined and exported but nothing outside maintenance calls it, so the "
+            "table it maintains stays empty and whatever reads it silently falls back"
+        )
