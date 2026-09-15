@@ -444,12 +444,28 @@ def test_cancel_delegates_to_the_supervisor_when_there_is_one(engine, reader, wo
     assert supervisor.cancelled == [accepted.job_id]
 
 
-def test_cancelling_a_finished_job_is_a_no_op(engine, reader, world):
+def test_cancelling_a_finished_job_is_refused_like_pause_and_resume(engine, reader, world):
+    """A second cancel must not report success for work it did not stop.
+
+    The first cancel settles the job to cancelled, which is terminal. Answering the second one
+    with 200 and tasks_cancelled 0 reads exactly like cancelling a live job that had nothing
+    pending left, so the three lifecycle actions all refuse a terminal job the same way.
+    """
     service = build(engine, reader)
     accepted = run(service.create(order()))
     run(service.cancel(accepted.job_id))
-    again = run(service.cancel(accepted.job_id))
-    assert again.status == "cancelled"
+    assert service.get(accepted.job_id)["status"] == "cancelled"
+
+    for action in (
+        lambda: run(service.cancel(accepted.job_id)),
+        lambda: service.pause(accepted.job_id),
+        lambda: service.resume(accepted.job_id),
+    ):
+        with pytest.raises(JobServiceError) as raised:
+            action()
+        assert raised.value.code == "job_finished"
+        assert raised.value.status_code == 409
+        assert raised.value.detail == {"status": "cancelled"}
 
 
 def test_retry_failed_creates_a_child_and_never_rewrites_the_parent(engine, reader, world):

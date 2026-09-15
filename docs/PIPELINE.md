@@ -47,7 +47,10 @@ state and never touches Fyers. For each selected expiry:
      budget for nothing
    - set `range_to` at least one full resolution period before now for any window that reaches
      the present, so a partial forming bar is never persisted
-4. Chunk that window into at most 95 calendar day pieces. 95 and not 100, deliberately: the docs
+4. Chunk that window into at most 100 calendar day pieces. The vendor limit was ambiguous when
+   this was written and 95 was chosen for margin. It has since been measured against the live
+   API (docs/API-PROBES.md): the limit counts CALENDAR days and a span of 101 is a hard 422, so
+   the chunker uses 100 inclusive days, which leaves one day of margin. The docs
    do not say whether the documented 100 day limit is calendar days or trading days, and a five
    day margin costs about five percent more requests and removes the ambiguity entirely.
 5. Subtract every chunk already present in `candle_coverage` with a matching `include_oi` flag and

@@ -356,7 +356,19 @@ could ask for.
 ### POST /api/v1/jobs/{job_id}/resume
 ### POST /api/v1/jobs/{job_id}/cancel
 Limit: 30/min each. Response `200` with the updated job.
-`cancel` sets `cancel_requested`; in-flight tasks finish and write their data.
+`cancel` sets `cancel_requested`; in-flight tasks finish and write their data, and the response
+adds `tasks_cancelled` with the number of pending tasks that were stopped.
+
+All three refuse a job in a terminal status (`completed`, `completed_with_errors`, `cancelled`,
+`failed`) with `409 job_finished`, whose `detail.status` names the status the job is actually in,
+and an unknown job with `404 not_found`. Cancel is deliberately not idempotent over a finished
+job: a `200` with `tasks_cancelled: 0` cannot be told apart from cancelling a live job that had
+nothing pending left, so it would report success for work that was never stopped.
+
+Within a live job the actions are idempotent: pausing an already `paused` job and resuming an
+already `queued` or `running` job both answer `200` and change nothing. `pause` refuses any other
+live status with `409 not_pausable`, and `resume` refuses one that is not `paused`,
+`blocked_auth`, `blocked_rate` or `deferred_budget` with `409 not_resumable`.
 
 ### POST /api/v1/jobs/{job_id}/retry-failed
 Limit: 30/min.
@@ -448,8 +460,11 @@ Request:
 
 Response `202` `{ "export_id": "uuid", "job_id": "uuid", "status": "queued" }`.
 Behaviour: runs as a normal job so it reports progress like a download. `COPY TO` with
-`ROW_GROUP_SIZE 122880` for a single query export and `1000000` for a Hive archive. CSV carries
-both a formatted IST string and the raw UTC epoch. `include_catalog` writes `dim_contract`,
+`ROW_GROUP_SIZE 122880` for a single query export and `1000000` for a Hive archive. Every export
+carries the bar time twice, as `ts_ist` (a naive IST wall clock string) and `ts_utc_epoch` (the
+same instant as whole seconds since the Unix epoch, written as a BIGINT and never as a float).
+Prices stay `DECIMAL(11,4)` in Parquet and keep all four decimal places in CSV, and a null `oi` is
+written as an empty CSV field rather than a zero. `include_catalog` writes `dim_contract`,
 `dim_underlying`, `dim_expiry` and `dim_resolution` alongside, which makes the archive a
 restorable backup rather than a one-way dump. Written to a temp name and atomically renamed.
 Errors: `507 insufficient_disk` (the estimate plus a 20 percent margin exceeds free space).

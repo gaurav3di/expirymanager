@@ -6,10 +6,10 @@ import { cn } from 'cn'
 
 import {
   BrokerCredentialsForm,
-  CERTIFICATE_NOTE,
   CopyField,
   FyersConnectPanel,
   REDIRECT_URI,
+  SCHEME_NOTE,
   apiErrorMessage,
 } from '@/components/settings/BrokerPanel'
 import { Button } from '@/components/ui/button'
@@ -387,7 +387,7 @@ export function SetupRoute() {
                   app id.
                 </p>
                 <p className="text-sm text-muted-foreground">
-                  It says https because that is what Fyers requires. {CERTIFICATE_NOTE}
+                  It says http, and that is deliberate. {SCHEME_NOTE}
                 </p>
               </CardContent>
             </Card>
@@ -431,7 +431,8 @@ export function SetupRoute() {
                 </div>
               ) : (
                 <p className="text-sm text-muted-foreground">
-                  Press Connect below. A new tab opens on the Fyers login page. {CERTIFICATE_NOTE}
+                  Press Connect below. A new tab opens on the Fyers login page, where you sign in
+                  with your Fyers password and TOTP. You are returned here automatically.
                 </p>
               )}
 

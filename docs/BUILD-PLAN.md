@@ -146,7 +146,7 @@ raw substring retained, the runtime year window (2015 to current year plus 5), a
 top-level scoring tie, and `parse_method` and `parse_confidence` on every result. The root
 registry is anchored at the start of the body and tried longest first. `calendar.py` provides IST
 trading days over `market_holiday`, exchange floors, the 30 trading day seconds window, the
-partial candle offset per resolution and the 95 calendar day chunker with half-open IST day
+partial candle offset per resolution and the 100 calendar day chunker with half-open IST day
 boundaries. `symbols.json` holds the 38 doc-verbatim symbols plus the constructed edge cases
 (NIFTYNXT50 weekly, BANKNIFTY containing NIFTY, MARUTI containing MAR, SENSEX50 monthly, M&M,
 BAJAJ-AUTO cash, GBPINR decimal strike, the October letter-O case, and

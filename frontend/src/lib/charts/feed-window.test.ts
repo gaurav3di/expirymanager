@@ -68,7 +68,7 @@ function recorder(options: { first?: number; last?: number } = {}) {
 }
 
 describe('clampWindow', () => {
-  it('slides the widget’s now-relative window back onto the contract, keeping its span', () => {
+  it("slides the widget now-relative window back onto the contract, keeping its span", () => {
     // Exactly what createWidget sends for a 5 minute chart at 500 bars: about 42 hours ending now.
     const now = Math.floor(Date.now() / 1000)
     const span = 500 * 300
@@ -114,7 +114,7 @@ describe('clampWindow', () => {
     })
   })
 
-  it('answers the contract’s whole life when no window is given', () => {
+  it("answers the whole life of the contract when no window is given", () => {
     expect(clampWindow({ firstTs: FIRST_TS, lastTs: LAST_TS }, undefined, undefined)).toEqual({
       from: FIRST_TS,
       to: LAST_TS,

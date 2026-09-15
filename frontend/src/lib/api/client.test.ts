@@ -4,8 +4,19 @@
 // guarantees are worth pinning: the CSRF header on unsafe methods and nowhere else, cookies on
 // every request, and a typed error carrying the backend's own code.
 //
+// Every unsafe request in the application depends on this one header, so the last section of this
+// file follows it the whole way: the name and the cookie are read out of the backend's own source
+// rather than copied, the rejection body is the one the running backend actually answered with,
+// and the end of the chain is the sentence that lands on the screen.
+//
 // Every token in this file is synthetic. Nothing here is or resembles a real credential.
 
+import fs from 'node:fs'
+import path from 'node:path'
+
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -16,8 +27,10 @@ import {
   buildQuery,
   isTerminalApiError,
   onApiEvent,
+  readCookie,
   readCsrfToken,
 } from '@/lib/api/client'
+import { BrokerPanel, apiErrorMessage } from '@/components/settings/BrokerPanel'
 
 const SYNTHETIC_CSRF = 'test-csrf-token-not-a-real-secret'
 
@@ -294,5 +307,186 @@ describe('responses', () => {
     await expect(api.get<{ provisioned: boolean }>('/bootstrap')).resolves.toEqual({
       provisioned: true,
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The CSRF chain, from the backend's constants to the sentence on the screen
+// ---------------------------------------------------------------------------
+
+/** The repository root, so the backend's own source can be read rather than paraphrased. */
+const backendDir = path.resolve(import.meta.dirname, '..', '..', '..', '..', 'backend')
+
+function backendSource(...parts: string[]): string {
+  return fs.readFileSync(path.join(backendDir, 'expirymanager', ...parts), 'utf8')
+}
+
+function setNamedCookie(name: string, value: string): void {
+  document.cookie = name + '=' + value + '; path=/'
+}
+
+/** Every header on the last request, keyed lower case, which is how they travel on the wire. */
+function lowerCaseHeaders(): Record<string, string> {
+  const headers = (lastRequest().init.headers ?? {}) as Record<string, string>
+  return Object.fromEntries(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]))
+}
+
+describe('the csrf contract with the backend', () => {
+  it('sends the header name the backend reads, under the cookie name the backend sets', async () => {
+    // Both ends of a synchronizer token have to agree on two strings. Reading them out of the
+    // backend rather than restating them here means a rename there fails this test instead of
+    // turning every unsafe request in the app into a 403 at runtime.
+    const headerName = /CSRF_HEADER_NAME = "([^"]+)"/.exec(backendSource('security', 'csrf.py'))?.[1]
+    const cookieName = /CSRF_COOKIE_NAME = "([^"]+)"/.exec(
+      backendSource('security', 'sessions.py'),
+    )?.[1]
+    expect(headerName).toBeTruthy()
+    expect(cookieName).toBeTruthy()
+
+    setNamedCookie(cookieName as string, SYNTHETIC_CSRF)
+    mockFetch(() => jsonResponse({ ok: true }))
+    await api.post('/broker/fyers/connect')
+
+    expect(readCsrfToken()).toBe(SYNTHETIC_CSRF)
+    expect(lowerCaseHeaders()[headerName as string]).toBe(SYNTHETIC_CSRF)
+  })
+
+  it('does not mistake another cookie whose name merely ends in the same text', async () => {
+    setNamedCookie('other_em_csrf', 'a-different-synthetic-value')
+    setCookie(SYNTHETIC_CSRF)
+    mockFetch(() => jsonResponse({ ok: true }))
+
+    await api.post('/auth/logout')
+
+    expect(headerOf('X-CSRF-Token')).toBe(SYNTHETIC_CSRF)
+  })
+
+  it('reads nothing at all when only the look alike cookie is present', async () => {
+    setNamedCookie('other_em_csrf', 'a-different-synthetic-value')
+    mockFetch(() => jsonResponse({ ok: true }))
+
+    await api.post('/auth/logout')
+
+    expect(readCsrfToken()).toBeNull()
+    // Absent, not an empty string. An empty header is a value the backend would compare and
+    // reject with a different reason than the one that is true.
+    expect('X-CSRF-Token' in ((lastRequest().init.headers ?? {}) as Record<string, string>)).toBe(
+      false,
+    )
+  })
+
+  it('keeps the token out of the url, where it would land in logs and history', async () => {
+    setCookie(SYNTHETIC_CSRF)
+    mockFetch(() => jsonResponse({ ok: true }))
+
+    await api.post('/exports', { body: { kind: 'csv' }, query: { dry_run: true } })
+
+    expect(lastRequest().url).toBe('/api/v1/exports?dry_run=true')
+    expect(lastRequest().url).not.toContain(SYNTHETIC_CSRF)
+  })
+
+  it('never echoes the session cookie anywhere, only the token cookie', async () => {
+    // em_session is HttpOnly in the browser, so script cannot read it at all. This pins the rule
+    // for the one environment where it can: nothing but em_csrf is ever put into a header.
+    setNamedCookie('em_session', 'synthetic-session-value')
+    setCookie(SYNTHETIC_CSRF)
+    mockFetch(() => jsonResponse({ ok: true }))
+
+    await api.post('/auth/logout')
+
+    expect(readCookie('em_session')).toBe('synthetic-session-value')
+    const sent = Object.values(lastRequest().init.headers as Record<string, string>)
+    expect(sent).not.toContain('synthetic-session-value')
+    expect(sent).toContain(SYNTHETIC_CSRF)
+  })
+})
+
+describe('a rejected unsafe request', () => {
+  /** The body the running backend actually answered a POST with no token with, recorded from
+   *  127.0.0.1:8000. Only the correlation id is replaced, with a synthetic one. */
+  const MEASURED_CSRF_REJECTION = {
+    error: {
+      code: 'csrf_invalid',
+      message: 'The request could not be verified. Reload the page and try again.',
+      correlation_id: 'c0ffee1234567890',
+    },
+  }
+
+  function rejectWithMeasuredBody(): void {
+    mockFetch(
+      () =>
+        new Response(JSON.stringify(MEASURED_CSRF_REJECTION), {
+          status: 403,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    )
+  }
+
+  it('carries the backend reason code rather than a generic failure', async () => {
+    rejectWithMeasuredBody()
+
+    const error = (await api.post('/downloads').catch((thrown: unknown) => thrown)) as ApiError
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error.status).toBe(403)
+    expect(error.code).toBe('csrf_invalid')
+    expect(error.correlationId).toBe('c0ffee1234567890')
+  })
+
+  it('is not reported as an expired session, which would throw the user out of the page', async () => {
+    const seen: ApiError[] = []
+    const unsubscribe = onApiEvent('unauthenticated', (error) => seen.push(error))
+    rejectWithMeasuredBody()
+
+    await api.post('/downloads').catch(() => undefined)
+    unsubscribe()
+
+    expect(seen).toHaveLength(0)
+  })
+
+  it('is not retried, because a request the backend refused to verify cannot succeed by repeating', async () => {
+    const error = new ApiError({ status: 403, code: 'csrf_invalid', message: 'x' })
+    expect(isTerminalApiError(error)).toBe(true)
+  })
+
+  it('becomes a sentence with a next step in it, and a reference to quote', async () => {
+    rejectWithMeasuredBody()
+
+    const error = await api.post('/broker/fyers/credentials', { body: {} }).catch((e: unknown) => e)
+    const sentence = apiErrorMessage(error)
+
+    expect(sentence).toBe(
+      'The request could not be verified. Reload the page and try again. Reference c0ffee1234567890.',
+    )
+  })
+
+  it('renders that sentence on the screen instead of failing quietly', async () => {
+    rejectWithMeasuredBody()
+    const error = await api.post('/broker/fyers/credentials', { body: {} }).catch((e: unknown) => e)
+
+    const markup = renderToStaticMarkup(
+      createElement(
+        QueryClientProvider,
+        { client: new QueryClient({ defaultOptions: { queries: { retry: false } } }) },
+        createElement(BrokerPanel, { status: undefined, error }),
+      ),
+    )
+
+    expect(markup).toContain('The request could not be verified. Reload the page and try again.')
+    expect(markup).toContain('Reference c0ffee1234567890.')
+  })
+
+  it('repeats every rejection reason the backend has, word for word', () => {
+    // The middleware answers with one of a small set of safe sentences. Whichever one it chooses,
+    // the user sees that sentence: the client does not translate it, and does not replace it with
+    // a code.
+    const source = backendSource('security', 'csrf.py')
+    const messages = [...source.matchAll(/REASON_[A-Z_]+: "([^"]+)"/g)].map((match) => match[1])
+    expect(messages.length).toBeGreaterThanOrEqual(3)
+
+    for (const message of messages) {
+      const error = new ApiError({ status: 403, code: 'cross_origin_rejected', message })
+      expect(apiErrorMessage(error)).toBe(message)
+    }
   })
 })

@@ -485,12 +485,13 @@ class JobService:
 
         A cancelled job therefore leaves valid partial data plus an accurate ledger of exactly
         what it did and did not fetch, which is the reason the ledger exists.
+
+        A finished job is refused with 409 job_finished, exactly as pause and resume refuse it.
+        Answering 200 with tasks_cancelled 0 cannot be told apart from cancelling a live job that
+        happened to have nothing pending left, so it reports success for work that was never
+        stopped. The refusal names the status the job is actually in.
         """
-        row = self._job_row(job_id)
-        if row is None:
-            raise JobServiceError("not_found", f"No job {job_id}.", status_code=404)
-        if row["status"] in TERMINAL_JOB_STATUSES:
-            return self._action(job_id)
+        self._require_live(job_id)
 
         if self._supervisor is not None:
             cancelled = int(await self._supervisor.cancel_job(job_id))

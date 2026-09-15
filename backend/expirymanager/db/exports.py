@@ -158,6 +158,11 @@ class ExportResult:
 
 # The denormalised projection. Column order is deliberate: identity first, then time, then the
 # values, so that a human opening the CSV can read it left to right.
+#
+# ts_utc_epoch is cast to BIGINT because DuckDB's epoch() returns a DOUBLE. Without the cast the
+# CSV carries 1732160760.0 and the Parquet column is a float64, so a backtester reading a column
+# documented as epoch seconds gets a float and has to round it back. The bars route already casts
+# the same column in Python for the same reason.
 _DENORMALISED = f"""
 SELECT c.fyers_symbol                                   AS symbol,
        u.fyers_symbol                                   AS underlying_symbol,
@@ -171,7 +176,7 @@ SELECT c.fyers_symbol                                   AS symbol,
        c.lot_size                                       AS lot_size,
        r.fyers_code                                     AS resolution,
        strftime(k.ts, '%Y-%m-%d %H:%M:%S')              AS ts_ist,
-       epoch(k.ts) - {IST_OFFSET_SECONDS}               AS ts_utc_epoch,
+       CAST(epoch(k.ts) AS BIGINT) - {IST_OFFSET_SECONDS}  AS ts_utc_epoch,
        k.open, k.high, k.low, k.close, k.volume, k.oi,
        k.contract_id                                    AS contract_id,
        k.res_id                                         AS res_id
@@ -184,7 +189,7 @@ SELECT c.fyers_symbol                                   AS symbol,
 _RAW = f"""
 SELECT k.contract_id, k.res_id,
        strftime(k.ts, '%Y-%m-%d %H:%M:%S')  AS ts_ist,
-       epoch(k.ts) - {IST_OFFSET_SECONDS}   AS ts_utc_epoch,
+       CAST(epoch(k.ts) AS BIGINT) - {IST_OFFSET_SECONDS}  AS ts_utc_epoch,
        k.open, k.high, k.low, k.close, k.volume, k.oi
   FROM candles k
   JOIN dim_contract c USING (contract_id)

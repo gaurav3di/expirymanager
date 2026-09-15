@@ -149,7 +149,8 @@ Total length is therefore 12 to 16 characters. Worked examples taken from doc sa
 
 Two useful consequences:
 
-1. The fytoken independently encodes the expiry date, including for monthly coded symbols where the symbol itself does not. `NSE:NIFTY26SEPFUT` gives `260929`, and the futures chain sample confirms the same contract with `expiry` epoch `1790676600` which is 2026-09-29 15:30 IST. So wherever a fytoken is available, it is a free cross check on the parsed expiry, and a free source of the day component for monthly coded symbols.
+1. The fytoken independently encodes the expiry date, including for monthly coded symbols where the symbol itself does not. `NSE:NIFTY26SEPFUT` gives `260929`, and the futures chain sample confirms the same contract with `expiry` epoch `1790676600` which is 2026-09-29 15:40 IST (this note originally read 15:30, written before the NSE
+derivatives close was measured as having moved to 15:40 on 2026-08-03). So wherever a fytoken is available, it is a free cross check on the parsed expiry, and a free source of the day component for monthly coded symbols.
 2. Fytoken must be stored as TEXT, never as an integer. Lengths vary from 12 to 16, the value has no arithmetic meaning, and treating it as a number invites precision loss and loss of any structure you might want to slice.
 
 Limitation: the three expired F&O endpoints in `24-expired-f-o-contracts-data.md` return only symbol strings. They return NO fytoken, NO lot size, NO tick size, NO strike, NO instrument type. All of that metadata has to come from parsing plus the symbol master. That is exactly why the parser in section 7 has to be airtight.

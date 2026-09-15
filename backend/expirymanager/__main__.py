@@ -97,6 +97,13 @@ def prepare(args: argparse.Namespace) -> tuple[paths_module.Paths, tuple[Path, P
     paths_module.set_process_umask()
     paths = paths_module.ensure(args.data_dir, ensure_tls=False)
 
+    # uvicorn calls the app factory itself, and with --reload it calls it in a child process, so
+    # there is no argument seam through which --data-dir could reach create_app(). The environment
+    # is the seam paths.default_root() already reads, and a child process inherits it. Without
+    # this, --data-dir would move only the directory tree, the lock and the log file, while the
+    # key, the settings database and market.duckdb were still opened under ~/.expirymanager.
+    os.environ[paths_module.HOME_ENV_VAR] = str(paths.root)
+
     configure_logging(
         log_file=paths.log_file,
         level=args.log_level.upper(),

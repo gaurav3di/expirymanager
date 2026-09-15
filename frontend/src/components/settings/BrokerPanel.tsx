@@ -66,12 +66,13 @@ import { formatDateTime, formatLatency, formatRelative } from '@/lib/format'
  *  and to what is registered on the Fyers dashboard. */
 export const REDIRECT_URI = 'http://127.0.0.1:8000/fyers/callback'
 
-/** Where the certificate warning is expected, said the same way everywhere it is said. */
-export const CERTIFICATE_NOTE =
-  'The app serves https on 127.0.0.1 with a certificate it generated itself, because that is ' +
-  'what the Fyers redirect URL requires. The browser calls that certificate untrusted and shows ' +
-  'a warning the first time. That is expected. Choose the advanced option and continue to ' +
-  '127.0.0.1 once, and the warning does not come back.'
+/** Why the redirect URL reads http, said the same way everywhere it is said. */
+export const SCHEME_NOTE =
+  'The app serves plain HTTP on 127.0.0.1, so there is no certificate and no browser warning ' +
+  'to accept. The scheme is not a preference: Fyers matches the registered redirect URL ' +
+  'character for character, and the one registered for this app is http. Loopback is the one ' +
+  'place that is safe, because nothing leaves this machine. If you re-register the redirect ' +
+  'URL as https, start the app with --https so the two agree again.'
 
 // ---------------------------------------------------------------------------
 // The pasted redirect URL
@@ -777,7 +778,7 @@ export function FyersConnectPanel({ status, className }: FyersConnectPanelProps)
           <p className="font-medium">Waiting for the Fyers tab</p>
           <p className="mt-1 text-xs text-muted-foreground">
             Sign in there with your Fyers password and TOTP. You are returned to this app
-            automatically, and this screen notices within a few seconds. {CERTIFICATE_NOTE}
+            automatically, and this screen notices within a few seconds.
           </p>
           {authorizeUrl ? (
             <p className="mt-1 text-xs text-muted-foreground">
@@ -812,8 +813,9 @@ export function FyersConnectPanel({ status, className }: FyersConnectPanelProps)
           <div className="min-w-0">
             <p className="text-sm font-medium">The return did not land</p>
             <p className="text-xs text-muted-foreground">
-              Most often because the certificate warning was declined in the Fyers tab, so the
-              browser never loaded the callback. Paste the URL from that tab instead.
+              Most often because the redirect URL registered with Fyers is not character for
+              character the one above, or because the tab was closed before it came back. Paste
+              the URL from that tab instead.
             </p>
           </div>
           <Button

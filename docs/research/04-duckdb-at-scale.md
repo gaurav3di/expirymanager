@@ -1,5 +1,11 @@
 # DuckDB at Scale for ExpiryManager
 
+> Note, added after this research was written: the `DECIMAL(9,2)` price decision below
+> was SUPERSEDED. Candle prices are `DECIMAL(11,4)`, because 9,2 cannot represent the
+> 0.0025 currency-derivative tick and the product lets a user register their own
+> underlying. See docs/DATA-MODEL.md. The measurements here are still accurate.
+
+
 Research notes for storing and querying a very large options and futures OHLCV time series
 in DuckDB, driven from a Python FastAPI service with a background scheduler.
 

@@ -13,6 +13,7 @@ secrets/
 # Application data directory: databases, TLS material, exports, logs
 data/
 .expirymanager/
+tls/
 *.duckdb
 *.duckdb.wal
 *.duckdb.tmp/
