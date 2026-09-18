@@ -24,8 +24,12 @@ tls/
 *.db
 *.db-wal
 *.db-shm
-exports/
-logs/
+# Anchored, because an unanchored `exports/` matches every directory of that name anywhere in
+# the tree. It matched frontend/src/components/exports, which is why that component is absent
+# from the repository: it was written, git ignored it, and nothing ever said so.
+/exports/
+/logs/
+.expirymanager/
 *.log
 
 # Python
