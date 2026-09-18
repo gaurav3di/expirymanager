@@ -26,6 +26,7 @@ from expirymanager import settings_store, version
 from expirymanager.db import arrow, migrate, sqlite, writer
 from expirymanager.db.duck import DuckStore
 from expirymanager.security import kek, keys
+from tests.platform_support import MODE_BITS_ARE_MEANINGFUL
 
 # One IST trading session, epoch seconds as Fyers returns them. 1742960700 is the vendor's own
 # documented sample and equals 2025-03-26 09:15 IST, which anchors the offset conversion.
@@ -53,7 +54,8 @@ def test_empty_directory_boots_to_a_complete_install(data_root: Path) -> None:
     assert paths.root == data_root
     for directory in paths.directories():
         assert directory.is_dir(), f"{directory} was not created"
-        assert directory.stat().st_mode & 0o777 == 0o700, f"{directory} is not private"
+        if MODE_BITS_ARE_MEANINGFUL:
+            assert directory.stat().st_mode & 0o777 == 0o700, f"{directory} is not private"
 
     # --- W01 seam onto W04: the entry point finds the TLS generator -------------------------
     # ensure() already called the seam. It must have produced real material, not fallen through
@@ -62,8 +64,9 @@ def test_empty_directory_boots_to_a_complete_install(data_root: Path) -> None:
     assert material is not None, "the TLS seam returned None, so the server would drop to http"
     key_path, cert_path = material
     assert key_path == paths.tls_key and cert_path == paths.tls_cert
-    for secret in (key_path, cert_path):
-        assert secret.stat().st_mode & 0o777 == 0o600, f"{secret} is not 0600"
+    if MODE_BITS_ARE_MEANINGFUL:
+        for secret in (key_path, cert_path):
+            assert secret.stat().st_mode & 0o777 == 0o600, f"{secret} is not 0600"
     # The generated pair has to satisfy the exact call uvicorn makes, not merely parse.
     ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(cert_path, key_path)
 
@@ -74,7 +77,8 @@ def test_empty_directory_boots_to_a_complete_install(data_root: Path) -> None:
         expected_versions = [m.version for m in migrate.discover_migrations()]
         assert applied == expected_versions, f"expected {expected_versions}, applied {applied}"
         assert migrate.current_version(engine) == max(expected_versions)
-        assert paths.sqlite_db.stat().st_mode & 0o777 == 0o600
+        if MODE_BITS_ARE_MEANINGFUL:
+            assert paths.sqlite_db.stat().st_mode & 0o777 == 0o600
 
         pragmas = sqlite.read_pragmas(engine)
         assert pragmas["journal_mode"] == "wal"
@@ -101,7 +105,8 @@ def test_empty_directory_boots_to_a_complete_install(data_root: Path) -> None:
             provider = kek.build_kek_provider(kek.DEFAULT_PROVIDER, key_path=paths.master_key)
             manager = keys.KeyManager(key_store, provider)
             assert manager.ensure_dek() == 1
-            assert paths.master_key.stat().st_mode & 0o777 == 0o600
+            if MODE_BITS_ARE_MEANINGFUL:
+                assert paths.master_key.stat().st_mode & 0o777 == 0o600
 
             secret = "synthetic-app-secret-not-a-real-credential"
             blob = manager.encrypt_field(

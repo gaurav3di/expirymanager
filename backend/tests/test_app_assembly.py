@@ -33,6 +33,7 @@ from expirymanager.db import sqlite as sqlite_module
 from expirymanager.db.writer import CallableWrite, WriterError
 from expirymanager.security.headers import CONTENT_SECURITY_POLICY, NO_STORE
 from expirymanager.version import __version__
+from tests.platform_support import requires_mode_bits
 
 BASE_URL = "https://127.0.0.1:8000"
 
@@ -85,6 +86,7 @@ class TestColdStart:
         assert paths.master_key.exists()
         sqlite_module.dispose_engine()
 
+    @requires_mode_bits
     def test_the_master_key_and_the_database_are_owner_only(self, client, app):
         paths = app.state.services.paths
         assert paths.master_key.stat().st_mode & 0o077 == 0

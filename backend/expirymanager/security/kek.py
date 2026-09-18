@@ -21,12 +21,14 @@ import base64
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from argon2.low_level import Type as Argon2Type
 from argon2.low_level import hash_secret_raw
 
+from expirymanager.paths import MODE_BITS_ARE_MEANINGFUL, O_BINARY
 from expirymanager.security.crypto import KEY_LEN
 
 KEYFILE = "keyfile"
@@ -73,7 +75,13 @@ def fsync_directory(directory: Path) -> None:
     """Make a newly created directory entry durable.
 
     Writing and fsyncing the file is not enough: after a crash the entry itself can be missing.
+
+    Windows has no counterpart and no way to fake one: a directory cannot be opened for reading
+    there, so there is no handle to fsync. The step is skipped rather than approximated, and the
+    durability of the directory entry is left to NTFS, whose metadata journal covers it.
     """
+    if sys.platform == "win32":
+        return
     fd = os.open(str(directory), os.O_RDONLY)
     try:
         os.fsync(fd)
@@ -93,7 +101,7 @@ def write_secret_file(path: Path, data: bytes, *, overwrite: bool = False) -> No
     target = path.with_name(path.name + ".tmp") if overwrite else path
     if overwrite and target.exists():
         target.unlink()
-    fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY, 0o600)
     try:
         os.write(fd, data)
         os.fsync(fd)
@@ -105,7 +113,14 @@ def write_secret_file(path: Path, data: bytes, *, overwrite: bool = False) -> No
 
 
 def assert_owner_only(path: Path) -> None:
-    """Refuse a secret file that any group or other bit can read."""
+    """Refuse a secret file that any group or other bit can read.
+
+    A no-op where mode bits carry no meaning. On Windows this file reads back as 0o666 no matter
+    what its ACL says, so enforcing the bits there would refuse every key this code has ever
+    written. See `paths.MODE_BITS_ARE_MEANINGFUL`.
+    """
+    if not MODE_BITS_ARE_MEANINGFUL:
+        return
     mode = path.stat().st_mode
     if mode & 0o077:
         raise KekPermissionError(

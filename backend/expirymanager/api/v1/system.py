@@ -465,12 +465,45 @@ def _copy_database(paths: Any, target_dir: Path) -> list[str]:
     return copied
 
 
+def _copy_database_offline(duck: Any, paths: Any, target_dir: Path) -> list[str]:
+    """Close the live database, copy the files, and reopen it.
+
+    Windows is where the close stops being optional: DuckDB holds the file there with a share mode
+    that denies every other reader, so a copy taken while the store is open fails outright with a
+    sharing violation and the backup produces nothing. POSIX has no mandatory locking and the same
+    copy succeeds, which is the worse outcome of the two: a file copied byte by byte from
+    underneath an open writer can land torn, and nothing about the restored file says so.
+
+    So the close is not a Windows workaround. It is the guarantee both platforms should have had,
+    and it is the same close and reopen the compaction path already does for the same reason.
+    """
+    duck.close()
+    try:
+        return _copy_database(paths, target_dir)
+    finally:
+        duck.open()
+
+
 async def _backup_and_settle(
     *, state: Any, engine: Any, duck: Any, paths: Any, target_dir: Path
 ) -> None:
+    """Quiesce the writer, copy the files with the database closed, then restart the writer.
+
+    The endpoint refuses unless the pipeline is already idle, but it refuses at request time and
+    this runs later, so the pause is what closes the window in between.
+    """
+    supervisor = state.supervisor
     try:
         await maintenance_module.checkpoint(duck)
-        copied = await run_in_threadpool(_copy_database, paths, target_dir)
+        if supervisor is not None:
+            await supervisor.dispatcher.pause("a database backup is running")
+        await duck.writer.stop()
+        try:
+            copied = await run_in_threadpool(_copy_database_offline, duck, paths, target_dir)
+        finally:
+            await duck.writer.start()
+            if supervisor is not None:
+                supervisor.dispatcher.resume()
     except Exception as exc:  # noqa: BLE001 - the user must be told, whatever went wrong
         log.exception("backup failed", extra={"target_dir": str(target_dir)})
         await run_in_threadpool(

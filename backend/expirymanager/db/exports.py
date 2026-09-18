@@ -26,6 +26,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -35,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Sequence
 from starlette.concurrency import run_in_threadpool
 
 from expirymanager.db.arrow import IST_OFFSET_SECONDS
+from expirymanager.paths import O_BINARY
 
 if TYPE_CHECKING:
     from expirymanager.db.duck import DuckStore
@@ -458,6 +460,12 @@ def _fsync_write(path: Path, text: str) -> None:
     _fsync(path)
 
 
+# Windows refuses to flush a handle that was not opened for writing: FlushFileBuffers wants write
+# access and the call comes back as EBADF. POSIX is happy to fsync a read-only descriptor, and
+# asking for write access there would fail on a file whose mode does not allow it.
+_FSYNC_FLAGS = (os.O_RDWR | O_BINARY) if sys.platform == "win32" else os.O_RDONLY
+
+
 def _fsync(path: Path) -> None:
     """Force the bytes down before the rename, so a crash cannot leave an empty finished file."""
     if path.is_dir():
@@ -465,7 +473,7 @@ def _fsync(path: Path) -> None:
             _fsync(child)
         _fsync_dir(path)
         return
-    handle = os.open(path, os.O_RDONLY)
+    handle = os.open(path, _FSYNC_FLAGS)
     try:
         os.fsync(handle)
     finally:
@@ -473,6 +481,10 @@ def _fsync(path: Path) -> None:
 
 
 def _fsync_dir(path: Path) -> None:
+    if sys.platform == "win32":
+        # A directory cannot be opened for reading on Windows, so there is no handle to fsync.
+        # The rename below is still atomic, which is what this call was protecting.
+        return
     handle = os.open(path, os.O_RDONLY)
     try:
         os.fsync(handle)

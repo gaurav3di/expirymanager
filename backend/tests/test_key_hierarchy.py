@@ -15,6 +15,7 @@ import types
 import pytest
 
 from expirymanager.security import crypto, kek, keys
+from tests.platform_support import MODE_BITS_ARE_MEANINGFUL, requires_mode_bits
 
 # The crypto_key DDL from DATA-MODEL.md section 1.2. W02 owns the migration; this copy only
 # exists so the store can be tested without depending on that item.
@@ -74,7 +75,8 @@ def test_key_file_is_created_0600_with_32_bytes(key_file) -> None:
     provider = kek.KeyFileKekProvider(key_file)
     provider.provision()
     assert key_file.exists()
-    assert key_file.stat().st_mode & 0o777 == 0o600
+    if MODE_BITS_ARE_MEANINGFUL:
+        assert key_file.stat().st_mode & 0o777 == 0o600
     assert len(key_file.read_bytes()) == crypto.KEY_LEN
     assert len(provider.kek()) == crypto.KEY_LEN
 
@@ -87,6 +89,7 @@ def test_key_file_provision_is_idempotent(key_file) -> None:
     assert provider.kek() == first
 
 
+@requires_mode_bits
 def test_loose_key_file_permissions_are_refused(key_file) -> None:
     provider = kek.KeyFileKekProvider(key_file)
     provider.provision()
@@ -182,7 +185,8 @@ def test_write_secret_file_refuses_to_clobber(key_file) -> None:
         kek.write_secret_file(key_file, b"b" * 32)
     kek.write_secret_file(key_file, b"c" * 32, overwrite=True)
     assert key_file.read_bytes() == b"c" * 32
-    assert key_file.stat().st_mode & 0o777 == 0o600
+    if MODE_BITS_ARE_MEANINGFUL:
+        assert key_file.stat().st_mode & 0o777 == 0o600
 
 
 def test_ensure_dek_creates_one_active_version(key_file) -> None:

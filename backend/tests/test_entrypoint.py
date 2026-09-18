@@ -9,6 +9,7 @@ import pytest
 
 from expirymanager import __main__ as entry
 from expirymanager.version import __version__
+from tests.platform_support import MODE_BITS_ARE_MEANINGFUL
 
 
 class TestFixedBindAddress:
@@ -85,7 +86,8 @@ class TestCheckRun:
 
         assert code == 0
         assert data_dir.is_dir()
-        assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
+        if MODE_BITS_ARE_MEANINGFUL:
+            assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
         assert (data_dir / "logs").is_dir()
 
         out = capsys.readouterr().out

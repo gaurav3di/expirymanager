@@ -170,6 +170,16 @@ inherit from the umask, and a later `chmod` on the main `.db` does not touch the
   expirymanager.lock       0600, advisory single-instance lock
 ```
 
+That table describes POSIX. Windows carries no mode bits: `stat` there synthesises a mode from a
+single attribute, so every writable file reads back as 0o666 whatever its ACL permits. The checks
+that enforce the table are therefore skipped on Windows rather than run against a number that
+means nothing, and `paths.MODE_BITS_ARE_MEANINGFUL` is the single place that decides. What
+protects the same files there is the ACL Windows puts on the user profile directory, which grants
+the owner and the administrators group and nobody else. The application neither sets nor inspects
+it, so a data directory relocated with `EXPIRYMANAGER_HOME` onto a volume or share with looser
+inherited permissions is as private as that location is, and nothing in the app will say
+otherwise.
+
 `paths.py` refuses to start if the data directory resolves under a known cloud sync root (iCloud
 Drive, Dropbox, OneDrive, Google Drive). WAL plus a sync client is a database corruption generator
 as well as a key leak path.

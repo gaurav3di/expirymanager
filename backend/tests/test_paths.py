@@ -23,6 +23,7 @@ from expirymanager.paths import (
     is_cloud_sync_root,
     resolve,
 )
+from tests.platform_support import MODE_BITS_ARE_MEANINGFUL, requires_mode_bits
 
 MAIN_MODULE = Path(__file__).resolve().parents[1] / "expirymanager" / "__main__.py"
 
@@ -68,6 +69,7 @@ class TestUmaskOrdering:
                 names = [alias.name for alias in node.names]
                 assert names == ["os"], f"import of {names} precedes the umask call"
 
+    @requires_mode_bits
     def test_set_process_umask_returns_the_previous_value(self, restore_umask) -> None:
         os.umask(0o022)
         previous = paths_module.set_process_umask()
@@ -75,6 +77,7 @@ class TestUmaskOrdering:
         current = os.umask(0o000)
         assert current == UMASK
 
+    @requires_mode_bits
     def test_ensure_sets_the_umask_before_creating_anything(
         self, tmp_path: Path, restore_umask
     ) -> None:
@@ -89,6 +92,7 @@ class TestUmaskOrdering:
         assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
 
 
+@requires_mode_bits
 class TestDirectoryModes:
     def test_every_directory_is_created_0700(self, tmp_path: Path, restore_umask) -> None:
         paths = ensure(tmp_path / "data", ensure_tls=False)
@@ -170,6 +174,7 @@ class TestCloudSyncRefusal:
         assert issubclass(CloudSyncRootError, PathsError)
 
 
+@requires_mode_bits
 class TestPrivateFileAssertion:
     def test_a_0600_file_passes(self, tmp_path: Path) -> None:
         secret = tmp_path / "master.key"
@@ -195,6 +200,7 @@ class TestPrivateFileAssertion:
 
 
 class TestInstanceLock:
+    @requires_mode_bits
     def test_the_lock_file_is_created_0600(self, tmp_path: Path, restore_umask) -> None:
         paths = ensure(tmp_path / "data", ensure_tls=False)
         with InstanceLock(paths.lock_file):
@@ -309,4 +315,5 @@ class TestTlsSeam:
         assert material is not None
         key_path, cert_path = material
         assert key_path.exists() and cert_path.exists()
-        assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+        if MODE_BITS_ARE_MEANINGFUL:
+            assert stat.S_IMODE(key_path.stat().st_mode) == 0o600

@@ -47,6 +47,14 @@ settings store, and because the cloud sync refusal below otherwise has no remedy
 SQLite creates the `-wal` and `-shm` sidecars itself and DuckDB creates its `.wal`, so a `chmod`
 applied after the database is opened leaves those files world readable and never fixes them.
 
+Those modes are POSIX. Windows has no mode bits and reports a synthesised 0o666 for every writable
+file, so the checks that enforce them are skipped there rather than run against a meaningless
+number; `paths.MODE_BITS_ARE_MEANINGFUL` is the one place that decides, and SECURITY.md section 3
+says what protects the same files instead. Two other platform seams live nearby: the advisory lock
+is `fcntl.flock` on POSIX and a `msvcrt` byte range lock on Windows, and `paths.O_BINARY` is on
+every `os.open` that carries bytes, because a text mode descriptor on Windows rewrites each 0x0A
+byte as 0x0D 0x0A and would corrupt roughly one generated key in nine.
+
 Startup refuses to run if the data directory resolves under a known cloud sync root (iCloud,
 Dropbox, OneDrive, Google Drive, and the macOS `Library/CloudStorage` provider layout). A sync
 client copying a write-ahead log out from under two open databases corrupts both, and it uploads

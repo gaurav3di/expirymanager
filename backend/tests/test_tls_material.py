@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from expirymanager.security import tls
+from tests.platform_support import requires_mode_bits
 
 
 def test_generates_certificate_with_the_required_names(tmp_path) -> None:
@@ -57,6 +58,7 @@ def test_validity_is_about_one_year_and_backdated(tmp_path) -> None:
     assert material.not_valid_after == certificate.not_valid_after_utc
 
 
+@requires_mode_bits
 def test_both_files_are_written_0600(tmp_path) -> None:
     material = tls.ensure_tls_material(tmp_path / "tls")
     assert material.key_path.stat().st_mode & 0o777 == 0o600
@@ -98,6 +100,7 @@ def test_missing_certificate_is_regenerated(tmp_path) -> None:
     assert tls.ensure_tls_material(directory).regenerated is True
 
 
+@requires_mode_bits
 def test_loose_permissions_force_regeneration(tmp_path) -> None:
     directory = tmp_path / "tls"
     material = tls.ensure_tls_material(directory)

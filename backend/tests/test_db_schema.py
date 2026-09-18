@@ -17,6 +17,7 @@ from sqlalchemy import inspect, text
 
 from expirymanager.db import migrate as migrate_module
 from expirymanager.db import models, sqlite as sqlite_module
+from tests.platform_support import requires_mode_bits
 
 EXPECTED_TABLES = {
     "schema_version",
@@ -395,6 +396,7 @@ class TestPragmas:
                 )
 
 
+@requires_mode_bits
 class TestFileModes:
     def test_database_and_sidecars_are_owner_only(self, db_path: Path, migrated):
         # Sidecars only exist while a WAL connection is open, so hold one for the assertion.

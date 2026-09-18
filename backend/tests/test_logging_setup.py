@@ -23,6 +23,7 @@ from expirymanager.logging_setup import (
     redact_text,
     redact_value,
 )
+from tests.platform_support import requires_mode_bits
 
 # Synthetic. Shaped like a JWT so the regex has something to match, and worthless.
 FAKE_JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMtdGVzdC1vbmx5In0.c2lnbmF0dXJl"
@@ -252,6 +253,7 @@ class TestConfigureLogging:
         assert FAKE_SECRET not in written
         assert "c-1" in written
 
+    @requires_mode_bits
     def test_the_log_file_is_created_0600_under_the_umask(
         self, tmp_path: Path, restore_logging
     ) -> None:

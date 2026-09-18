@@ -42,8 +42,13 @@ backtesting engine can read the store directly without a rewrite.
 | A Fyers account | any | With an app registered whose redirect URI is exactly `http://127.0.0.1:8000/fyers/callback`. |
 | Disk | 10 to 20 GB | The four seed underlyings over 2022 to 2026 at one minute land around 6 to 9 GB. |
 | Network | outbound https | To `api-t1.fyers.in` and `public.fyers.in`. |
+| OS | macOS, Linux or Windows | The scripts in `scripts/` are bash. On Windows run them from Git Bash, or call `uv run expirymanager` and `npm run build` directly. |
 
 The app runs on loopback only and is designed for a single local user on their own machine.
+
+On Windows the data directory is `%USERPROFILE%\.expirymanager` and its contents are protected by
+the profile directory ACL rather than by POSIX mode bits, which Windows does not carry. SECURITY.md
+section 3 says what that does and does not guarantee.
 
 There is no `.env` file and nothing to configure before the first start. Every setting lives in the
 database and is edited in the UI, and nothing outside the app data directory is ever written.

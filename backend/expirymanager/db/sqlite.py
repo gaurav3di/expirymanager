@@ -24,6 +24,8 @@ from sqlalchemy import create_engine as _sa_create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool
 
+from expirymanager.paths import O_BINARY
+
 __all__ = [
     "PRAGMAS",
     "FILE_MODE",
@@ -110,7 +112,7 @@ def _prepare_file(path: Path) -> None:
         pass
 
     if not path.exists():
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FILE_MODE)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY, FILE_MODE)
         os.close(fd)
     else:
         _chmod_quietly(path)

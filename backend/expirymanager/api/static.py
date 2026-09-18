@@ -37,7 +37,8 @@ log = logging.getLogger(__name__)
 INDEX_FILE = "index.html"
 
 # Paths the SPA fallback must never answer for. Written without the leading slash because
-# StaticFiles hands the path in that form.
+# StaticFiles hands the path in that form, and with forward slashes because `_url_path` below
+# puts them back before the comparison.
 RESERVED_PREFIXES: tuple[str, ...] = ("api/", "fyers/callback")
 
 _PACKAGE_ROOT = Path(__file__).resolve().parent.parent
@@ -62,11 +63,23 @@ def default_dist_dir() -> Path | None:
     return None
 
 
+def _url_path(path: str) -> str:
+    """The URL form of the path `StaticFiles` hands us, with no leading slash.
+
+    `StaticFiles.get_path` runs the URL through `os.path.normpath`, which on Windows returns the
+    separators as backslashes: `/api/v1/jobs` arrives as `api\v1\jobs`. A prefix test written
+    against `api/` therefore matches nothing on Windows, and every mistyped API path falls through
+    to the fallback below and comes back as a 200 full of HTML. Compare on one spelling instead of
+    trusting whichever one the platform chose.
+    """
+    return path.replace("\\", "/").lstrip("/")
+
+
 class SpaStaticFiles(StaticFiles):
     """`StaticFiles` with the single-page fallback, and without it for API paths."""
 
     async def get_response(self, path: str, scope) -> Response:  # type: ignore[no-untyped-def]
-        normalised = path.lstrip("/")
+        normalised = _url_path(path)
         if any(normalised.startswith(prefix) for prefix in RESERVED_PREFIXES):
             # Let the API's own 404 envelope answer. Falling back to index.html here would hand a
             # fetch() a 200 full of HTML.

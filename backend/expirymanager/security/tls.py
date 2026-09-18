@@ -24,6 +24,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
+from expirymanager.paths import is_private_file
 from expirymanager.security.kek import write_secret_file
 
 KEY_FILENAME = "server.key"
@@ -149,9 +150,10 @@ def regeneration_reason(
     cert_file = Path(cert_path)
     if not key_file.exists() or not cert_file.exists():
         return "missing"
-    if key_file.stat().st_mode & 0o077 or cert_file.stat().st_mode & 0o077:
+    if not is_private_file(key_file) or not is_private_file(cert_file):
         # A loose private key is cheaper to replace than to reason about, since it is self-signed
-        # and nothing else trusts it.
+        # and nothing else trusts it. `is_private_file` answers true where mode bits carry no
+        # meaning, so this does not become a rebuild on every start on Windows.
         return "loose_permissions"
     try:
         certificate = load_certificate(cert_file)
